@@ -1,0 +1,18 @@
+
+services:
+  ticktick-mcp:
+    image: ticktick-mcp-local:test
+    container_name: ticktick-mcp-local-test
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env.test
+    environment:
+      - MCP_PASSWORD=test-password-123
+      - API_HOST=${API_HOST:-https://api.ticktick.com}
+    restart: unless-stopped
+    
+    # 掛載本地代碼以便即時測試修改
+    volumes:
+      - ./ticktick_mcp:/app/ticktick_mcp
+      - ./.env.test:/app/.env:ro

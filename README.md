@@ -21,6 +21,8 @@ A [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server for Ti
 
 ## Installation
 
+### Option 1: Local Installation (Claude Desktop)
+
 1. **Clone this repository**:
    ```bash
    git clone https://github.com/jacepark12/ticktick-mcp.git
@@ -44,6 +46,13 @@ A [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server for Ti
    # Install the package
    uv pip install -e .
    ```
+
+### Option 2: Remote Server (Claude.ai Integrations)
+
+For running as a remote server accessible from anywhere, see [README-REMOTE.md](README-REMOTE.md). This allows you to:
+- Access TickTick from any device through Claude.ai
+- Run the server on your NAS or cloud server
+- Use password-protected endpoints
 
 3. **Authenticate with TickTick**:
    ```bash

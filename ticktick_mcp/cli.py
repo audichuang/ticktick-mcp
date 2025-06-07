@@ -12,6 +12,7 @@ from dotenv import load_dotenv
 
 from .src.server import main as server_main
 from .authenticate import main as auth_main
+from .src.remote_server import run_remote_server
 
 
 def check_auth_setup() -> bool:
@@ -41,14 +42,34 @@ def main():
     # 'auth' command for authentication
     auth_parser = subparsers.add_parser("auth", help="Authenticate with TickTick")
     
+    # 'remote' command for running remote SSE server
+    remote_parser = subparsers.add_parser("remote", help="Run the TickTick MCP server in remote mode (SSE)")
+    remote_parser.add_argument(
+        "--host", 
+        default="0.0.0.0", 
+        help="Host to bind to (default: 0.0.0.0)"
+    )
+    remote_parser.add_argument(
+        "--port", 
+        type=int,
+        default=8000, 
+        help="Port to bind to (default: 8000)"
+    )
+    remote_parser.add_argument(
+        "--log-level", 
+        default="info", 
+        choices=["debug", "info", "warning", "error"],
+        help="Log level (default: info)"
+    )
+    
     args = parser.parse_args()
     
     # If no command specified, default to 'run'
     if not args.command:
         args.command = "run"
     
-    # For the run command, check if auth is set up
-    if args.command == "run" and not check_auth_setup():
+    # For the run and remote commands, check if auth is set up
+    if args.command in ["run", "remote"] and not check_auth_setup():
         print("""
 ╔════════════════════════════════════════════════╗
 ║      TickTick MCP Server - Authentication      ║
@@ -92,6 +113,20 @@ Run 'uv run -m ticktick_mcp.cli auth' to set up authentication later.
             sys.exit(0)
         except Exception as e:
             print(f"Error starting server: {e}", file=sys.stderr)
+            sys.exit(1)
+    elif args.command == "remote":
+        # Run remote SSE server
+        try:
+            run_remote_server(
+                host=args.host,
+                port=args.port,
+                log_level=args.log_level
+            )
+        except KeyboardInterrupt:
+            print("Remote server stopped by user", file=sys.stderr)
+            sys.exit(0)
+        except Exception as e:
+            print(f"Error starting remote server: {e}", file=sys.stderr)
             sys.exit(1)
 
 if __name__ == "__main__":
