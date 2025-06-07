@@ -1,0 +1,20 @@
+services:
+  ticktick-mcp:
+    image: audichuang880208/ticktick-mcp:latest
+    container_name: ticktick-mcp-server
+    ports:
+      - "8000:8000"
+    environment:
+      # TickTick API credentials (from OAuth)
+      - TICKTICK_CLIENT_ID=${TICKTICK_CLIENT_ID}
+      - TICKTICK_CLIENT_SECRET=${TICKTICK_CLIENT_SECRET}
+      - TICKTICK_ACCESS_TOKEN=${TICKTICK_ACCESS_TOKEN}
+      - TICKTICK_REFRESH_TOKEN=${TICKTICK_REFRESH_TOKEN}
+      
+      # OAuth server configuration
+      - OAUTH_USERNAME=${OAUTH_USERNAME:-admin}
+      - OAUTH_PASSWORD=${OAUTH_PASSWORD:-change-me-to-secure-password}
+      
+      # Optional: API host configuration
+      - API_HOST=${API_HOST:-https://api.ticktick.com}
+    restart: unless-stopped
