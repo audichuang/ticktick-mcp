@@ -12,7 +12,9 @@ The remote mode allows you to:
 
 ## Security Features
 
-- **Password Protection**: Access is protected by a password in the URL path
+- **OAuth Authentication**: Access is protected by OAuth 2.0 authentication flow
+- **Login Page**: Users authenticate with username/password through a secure login page
+- **Bearer Tokens**: API access requires valid Bearer tokens
 - **HTTPS**: Use Cloudflare Tunnel or reverse proxy for encrypted connections
 - **Environment Variables**: Sensitive credentials stored in environment variables
 
@@ -41,14 +43,15 @@ This will:
 
 ### 2. Configure Environment
 
-Create or update your `.env` file with a secure password:
+Create or update your `.env` file with OAuth credentials:
 
 ```bash
 # Copy the example file
 cp .env.example .env
 
-# Edit .env and set your MCP_PASSWORD
-MCP_PASSWORD=your-very-secure-password-here
+# Edit .env and set your OAuth credentials
+OAUTH_USERNAME=admin
+OAUTH_PASSWORD=your-very-secure-password-here
 ```
 
 ### 3. Docker Deployment
@@ -118,22 +121,25 @@ uv run -m ticktick_mcp.cli remote --host 0.0.0.0 --port 8000
 2. Click "Add integration"
 3. Enter:
    - **Name**: TickTick
-   - **URL**: `https://your-domain.com/{password}/mcp/sse`
+   - **URL**: `https://your-domain.com/sse`
    
-   Replace `{password}` with your actual MCP_PASSWORD value.
-   
-   Example: If your password is `my-secure-pass-123`, the URL would be:
+   Example:
    ```
-   https://ticktick-mcp.yourdomain.com/my-secure-pass-123/mcp/sse
+   https://ticktick-mcp.yourdomain.com/sse
    ```
 
 4. Click "Connect"
+5. Claude.ai will detect OAuth is required and redirect you to the login page
+6. Enter your OAUTH_USERNAME and OAUTH_PASSWORD
+7. After successful login, you'll be redirected back to Claude.ai
+8. Claude.ai will automatically exchange the authorization code for an access token
 
 ## Environment Variables
 
 | Variable | Description | Required |
 |----------|-------------|----------|
-| `MCP_PASSWORD` | Password for accessing the MCP server | Yes |
+| `OAUTH_USERNAME` | Username for OAuth login page | Yes |
+| `OAUTH_PASSWORD` | Password for OAuth login page | Yes |
 | `TICKTICK_CLIENT_ID` | TickTick OAuth Client ID | Yes |
 | `TICKTICK_CLIENT_SECRET` | TickTick OAuth Client Secret | Yes |
 | `TICKTICK_ACCESS_TOKEN` | TickTick Access Token (auto-generated) | Yes |
@@ -142,11 +148,12 @@ uv run -m ticktick_mcp.cli remote --host 0.0.0.0 --port 8000
 
 ## Security Best Practices
 
-1. **Use a Strong Password**: Generate a long, random password for `MCP_PASSWORD`
+1. **Use Strong Credentials**: Generate strong passwords for `OAUTH_USERNAME` and `OAUTH_PASSWORD`
 2. **Use HTTPS**: Always use Cloudflare Tunnel or another reverse proxy with SSL
 3. **Restrict Access**: Consider IP whitelisting at the firewall or Cloudflare level
 4. **Regular Updates**: Keep the Docker image and dependencies updated
 5. **Monitor Access**: Check logs regularly for unauthorized access attempts
+6. **Token Expiration**: OAuth tokens expire after 1 hour for added security
 
 ## Troubleshooting
 
@@ -176,10 +183,11 @@ TICKTICK_REFRESH_TOKEN=your_refresh_token
 - Check Docker logs: `docker-compose logs`
 
 ### Can't connect from Claude.ai
-- Verify the URL includes the correct password
-- Check if the server is accessible: `curl https://your-domain.com/health`
+- Verify the URL is correct (no password needed in URL with OAuth)
+- Check if OAuth discovery is working: `curl https://your-domain.com/.well-known/oauth-authorization-server`
 - Ensure Cloudflare Tunnel is running
 - Check server logs for error messages
+- Verify OAUTH_USERNAME and OAUTH_PASSWORD are set correctly
 
 ### Authentication errors
 - Re-run authentication: `uv run -m ticktick_mcp.cli auth`
@@ -218,10 +226,10 @@ server {
 
 ### Multiple Users
 
-To support multiple users, you can:
-1. Run multiple containers on different ports
-2. Use different passwords for each user
-3. Create separate Cloudflare Tunnel routes
+The current OAuth implementation uses a single username/password. To support multiple users:
+1. Run multiple containers on different ports with different OAuth credentials
+2. Create separate Cloudflare Tunnel routes for each instance
+3. Future enhancement: Implement a proper user database for multi-user support
 
 ## Support
 

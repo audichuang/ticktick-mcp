@@ -5,16 +5,17 @@
 Run these tests locally before deploying:
 
 ```bash
-# 1. Test server info endpoint (Claude.ai will check this)
-curl -i http://localhost:8000/{YOUR_PASSWORD}
-curl -i http://localhost:8000/{YOUR_PASSWORD}/
+# 1. Test OAuth discovery endpoint
+curl -i http://localhost:8000/.well-known/oauth-authorization-server
 
-# 2. Test SSE endpoint
-curl -i http://localhost:8000/{YOUR_PASSWORD}/sse
+# 2. Test server info endpoint
+curl -i http://localhost:8000/
 
-# 3. Test with wrong password (should return 404)
-curl -i http://localhost:8000/wrong-password
-curl -i http://localhost:8000/wrong-password/sse
+# 3. Test SSE endpoint without token (should return 401)
+curl -i http://localhost:8000/sse
+
+# 4. Test OAuth authorization page
+curl -i "http://localhost:8000/oauth/authorize?response_type=code&client_id=test&redirect_uri=http://localhost/callback"
 ```
 
 ## Environment Variables
@@ -25,7 +26,8 @@ TICKTICK_CLIENT_ID=your_client_id
 TICKTICK_CLIENT_SECRET=your_client_secret
 TICKTICK_ACCESS_TOKEN=your_access_token
 TICKTICK_REFRESH_TOKEN=your_refresh_token
-MCP_PASSWORD=your-secure-password
+OAUTH_USERNAME=admin
+OAUTH_PASSWORD=your-secure-password
 ```
 
 ## Docker Deployment

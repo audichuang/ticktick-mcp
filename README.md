@@ -52,7 +52,29 @@ A [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server for Ti
 For running as a remote server accessible from anywhere, see [README-REMOTE.md](README-REMOTE.md). This allows you to:
 - Access TickTick from any device through Claude.ai
 - Run the server on your NAS or cloud server
-- Use password-protected endpoints
+- Use OAuth authentication for secure access
+
+#### OAuth Server for Claude.ai
+
+If you need OAuth authentication flow (similar to Sentry's integration), we provide a built-in OAuth server:
+
+1. **Run the OAuth Server**:
+   ```bash
+   python ticktick_mcp/run_oauth_server.py --host 0.0.0.0 --port 8080
+   ```
+
+2. **Configure OAuth Credentials** in `.env`:
+   ```env
+   OAUTH_USERNAME=admin
+   OAUTH_PASSWORD=your-secure-password-here
+   ```
+
+3. **OAuth Flow**:
+   - Users are redirected to your OAuth server's login page
+   - After authentication, they're redirected back to Claude.ai with an authorization code
+   - Claude.ai exchanges the code for an access token
+
+See [OAuth_README.md](OAuth_README.md) for detailed OAuth server documentation.
 
 3. **Authenticate with TickTick**:
    ```bash

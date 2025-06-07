@@ -2,6 +2,10 @@ import asyncio
 import os
 import json
 import logging
+import time
+import secrets
+import urllib.parse
+import base64
 from datetime import datetime, timezone
 from typing import Dict, List, Any, Optional
 from dotenv import load_dotenv
@@ -16,10 +20,13 @@ logger = logging.getLogger(__name__)
 # Load environment variables
 load_dotenv()
 
-# Get password from environment
-MCP_PASSWORD = os.getenv("MCP_PASSWORD", "default-password-change-me")
-if MCP_PASSWORD == "default-password-change-me":
-    logger.warning("Using default password! Please set MCP_PASSWORD environment variable.")
+# OAuth configuration
+OAUTH_USERNAME = os.getenv("OAUTH_USERNAME", "admin")
+OAUTH_PASSWORD = os.getenv("OAUTH_PASSWORD", "password")
+
+# In-memory storage for OAuth
+auth_codes = {}  # code -> {client_id, redirect_uri, expires_at, username}
+access_tokens = {}  # token -> {username, expires_at, scope}
 
 # Create FastMCP server
 mcp = FastMCP("ticktick-remote")
@@ -425,16 +432,268 @@ if not os.path.exists('.env'):
     except Exception as e:
         logger.warning(f"Failed to setup credentials from environment: {e}")
 
+# HTML template for the login page
+LOGIN_PAGE_TEMPLATE = """<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TickTick MCP - Authorization</title>
+    <style>
+        * {{
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }}
+        
+        body {{
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background-color: #f5f5f5;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            padding: 20px;
+        }}
+        
+        .container {{
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1), 0 1px 3px rgba(0, 0, 0, 0.08);
+            max-width: 400px;
+            width: 100%;
+            padding: 40px;
+        }}
+        
+        .logo {{
+            text-align: center;
+            margin-bottom: 30px;
+        }}
+        
+        .logo h1 {{
+            color: #333;
+            font-size: 24px;
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+        }}
+        
+        .logo .icon {{
+            width: 32px;
+            height: 32px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-weight: bold;
+        }}
+        
+        .auth-info {{
+            background-color: #f8f9fa;
+            border: 1px solid #e9ecef;
+            border-radius: 8px;
+            padding: 16px;
+            margin-bottom: 24px;
+        }}
+        
+        .auth-info h2 {{
+            font-size: 16px;
+            color: #333;
+            margin-bottom: 8px;
+            font-weight: 500;
+        }}
+        
+        .auth-info .client-name {{
+            font-weight: 600;
+            color: #007bff;
+        }}
+        
+        .auth-info .redirect-url {{
+            font-size: 12px;
+            color: #6c757d;
+            word-break: break-all;
+            margin-top: 4px;
+        }}
+        
+        .form-group {{
+            margin-bottom: 20px;
+        }}
+        
+        label {{
+            display: block;
+            margin-bottom: 8px;
+            color: #495057;
+            font-size: 14px;
+            font-weight: 500;
+        }}
+        
+        input[type="text"],
+        input[type="password"] {{
+            width: 100%;
+            padding: 10px 14px;
+            border: 1px solid #ced4da;
+            border-radius: 6px;
+            font-size: 14px;
+            transition: border-color 0.15s ease-in-out, box-shadow 0.15s ease-in-out;
+        }}
+        
+        input[type="text"]:focus,
+        input[type="password"]:focus {{
+            outline: none;
+            border-color: #667eea;
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+        }}
+        
+        .button-group {{
+            display: flex;
+            gap: 12px;
+            margin-top: 24px;
+        }}
+        
+        button {{
+            flex: 1;
+            padding: 10px 20px;
+            border: none;
+            border-radius: 6px;
+            font-size: 14px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.15s ease-in-out;
+        }}
+        
+        .btn-cancel {{
+            background-color: #e9ecef;
+            color: #495057;
+        }}
+        
+        .btn-cancel:hover {{
+            background-color: #dee2e6;
+        }}
+        
+        .btn-approve {{
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }}
+        
+        .btn-approve:hover {{
+            transform: translateY(-1px);
+            box-shadow: 0 4px 12px rgba(102, 126, 234, 0.3);
+        }}
+        
+        .error-message {{
+            background-color: #f8d7da;
+            border: 1px solid #f5c6cb;
+            color: #721c24;
+            padding: 12px;
+            border-radius: 6px;
+            margin-bottom: 20px;
+            font-size: 14px;
+        }}
+        
+        .hidden {{
+            display: none;
+        }}
+        
+        @media (max-width: 480px) {{
+            .container {{
+                padding: 30px 20px;
+            }}
+            
+            .logo h1 {{
+                font-size: 20px;
+            }}
+            
+            .button-group {{
+                flex-direction: column;
+            }}
+        }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="logo">
+            <h1>
+                <span class="icon">T</span>
+                TickTick MCP
+            </h1>
+        </div>
+        
+        <div class="auth-info">
+            <h2><span class="client-name">{client_name}</span> is requesting access</h2>
+            <div class="redirect-url">Redirect: {redirect_url}</div>
+        </div>
+        
+        <div id="error-message" class="error-message {error_class}">
+            {error_message}
+        </div>
+        
+        <form method="POST" action="{form_action}">
+            <div class="form-group">
+                <label for="username">Username</label>
+                <input type="text" id="username" name="username" required autofocus>
+            </div>
+            
+            <div class="form-group">
+                <label for="password">Password</label>
+                <input type="password" id="password" name="password" required>
+            </div>
+            
+            <input type="hidden" name="client_id" value="{client_id}">
+            <input type="hidden" name="redirect_uri" value="{redirect_uri}">
+            <input type="hidden" name="response_type" value="{response_type}">
+            <input type="hidden" name="state" value="{state}">
+            <input type="hidden" name="scope" value="{scope}">
+            
+            <div class="button-group">
+                <button type="button" class="btn-cancel" onclick="handleCancel()">Cancel</button>
+                <button type="submit" class="btn-approve">Approve</button>
+            </div>
+        </form>
+    </div>
+    
+    <script>
+        function handleCancel() {{
+            // Redirect back with an error
+            const params = new URLSearchParams(window.location.search);
+            const redirectUri = params.get('redirect_uri');
+            const state = params.get('state');
+            
+            if (redirectUri) {{
+                const separator = redirectUri.includes('?') ? '&' : '?';
+                window.location.href = redirectUri + separator + 'error=access_denied' + (state ? '&state=' + state : '');
+            }}
+        }}
+    </script>
+</body>
+</html>
+"""
+
+def cleanup_expired_tokens():
+    """Remove expired authorization codes and access tokens."""
+    current_time = time.time()
+    
+    # Clean up auth codes
+    expired_codes = [code for code, data in auth_codes.items() if data['expires_at'] < current_time]
+    for code in expired_codes:
+        del auth_codes[code]
+    
+    # Clean up access tokens
+    expired_tokens = [token for token, data in access_tokens.items() if data['expires_at'] < current_time]
+    for token in expired_tokens:
+        del access_tokens[token]
+
 def run_remote_server(
     host: str = "0.0.0.0",
     port: int = 8000,
     log_level: str = "info"
 ):
-    """Run the remote server with SSE support and password protection."""
-    # For now, we'll use the standard SSE path without password in URL
-    # Password protection should be handled by reverse proxy or API gateway
-    logger.info(f"Starting TickTick MCP Remote Server on {host}:{port}")
-    logger.info(f"Current MCP_PASSWORD: {MCP_PASSWORD[:4]}..." if len(MCP_PASSWORD) > 4 else "No password set!")
+    """Run the remote server with SSE support and OAuth authentication."""
+    logger.info(f"Starting TickTick MCP Remote Server with OAuth on {host}:{port}")
+    logger.info(f"OAuth username: {OAUTH_USERNAME}")
     
     # Run the server with SSE transport using FastMCP's built-in method
     # Set environment variables for uvicorn
@@ -449,143 +708,442 @@ def run_remote_server(
     from starlette.responses import PlainTextResponse
     from starlette.middleware import Middleware
     
-    # Create a custom ASGI app with password protection
+    # Create a custom ASGI app with OAuth authentication
     mcp_app = mcp.sse_app()
     base_url = f"http://{host}:{port}"
     
-    async def password_protected_app(scope, receive, send):
-        """ASGI app that checks password in URL path"""
+    async def oauth_app(scope, receive, send):
+        """ASGI app that handles OAuth authentication"""
         if scope["type"] == "http":
             path = scope["path"]
+            headers = dict(scope.get("headers", []))
             
-            # Handle OAuth discovery endpoints
-            # These endpoints indicate OAuth is not supported/required
+            # Parse query parameters
+            query_string = scope.get("query_string", b"").decode("utf-8")
+            query_params = urllib.parse.parse_qs(query_string)
+            
+            # Handle OAuth discovery endpoint
             if path == "/.well-known/oauth-authorization-server":
-                # Return 404 to indicate OAuth is not supported
+                # Extract the actual host from request headers
+                host_header = headers.get(b'host', b'').decode('utf-8')
+                
+                # Check for X-Forwarded-Proto header (for reverse proxy scenarios)
+                proto_header = headers.get(b'x-forwarded-proto', b'').decode('utf-8')
+                protocol = proto_header if proto_header else 'https' if host_header and ':443' in host_header else 'http'
+                
+                # Construct the actual issuer URL based on the request
+                if host_header:
+                    issuer_url = f"{protocol}://{host_header}"
+                else:
+                    # Fallback to base_url if no host header
+                    issuer_url = base_url
+                
+                discovery = {
+                    "issuer": issuer_url,
+                    "authorization_endpoint": f"{issuer_url}/oauth/authorize",
+                    "token_endpoint": f"{issuer_url}/oauth/token",
+                    "registration_endpoint": f"{issuer_url}/oauth/register",
+                    "scopes_supported": ["mcp"],
+                    "response_types_supported": ["code"],
+                    "response_modes_supported": ["query"],
+                    "grant_types_supported": ["authorization_code", "refresh_token"],
+                    "token_endpoint_auth_methods_supported": ["client_secret_basic", "client_secret_post", "none"],
+                    "revocation_endpoint": f"{issuer_url}/oauth/token",
+                    "code_challenge_methods_supported": ["plain", "S256"]
+                }
+                
+                response_body = json.dumps(discovery).encode()
                 await send({
                     'type': 'http.response.start',
-                    'status': 404,
-                    'headers': [(b'content-type', b'text/plain')],
+                    'status': 200,
+                    'headers': [
+                        (b'content-type', b'application/json'),
+                        (b'access-control-allow-origin', b'*'),
+                        (b'cache-control', b'max-age=3600'),
+                    ],
                 })
                 await send({
                     'type': 'http.response.body',
-                    'body': b'Not Found',
+                    'body': response_body,
+                })
+                return
+            
+            # Handle OAuth authorize endpoint (GET)
+            if path == "/oauth/authorize" and scope["method"] == "GET":
+                # Extract parameters
+                client_id = query_params.get('client_id', [''])[0]
+                redirect_uri = query_params.get('redirect_uri', [''])[0]
+                response_type = query_params.get('response_type', [''])[0]
+                state = query_params.get('state', [''])[0]
+                scope_param = query_params.get('scope', [''])[0]
+                
+                # Validate required parameters
+                if not client_id or not redirect_uri or response_type != 'code':
+                    await send({
+                        'type': 'http.response.start',
+                        'status': 400,
+                        'headers': [(b'content-type', b'text/plain')],
+                    })
+                    await send({
+                        'type': 'http.response.body',
+                        'body': b'Invalid request parameters',
+                    })
+                    return
+                
+                # Prepare template variables
+                template_vars = {
+                    'client_name': 'claude.ai' if 'claude.ai' in redirect_uri else client_id,
+                    'client_id': client_id,
+                    'redirect_uri': redirect_uri,
+                    'redirect_url': redirect_uri,
+                    'response_type': response_type,
+                    'state': state,
+                    'scope': scope_param,
+                    'form_action': '/oauth/authorize',
+                    'error_message': '',
+                    'error_class': 'hidden'
+                }
+                
+                # Render the login page
+                html = LOGIN_PAGE_TEMPLATE.format(**template_vars)
+                
+                await send({
+                    'type': 'http.response.start',
+                    'status': 200,
+                    'headers': [
+                        (b'content-type', b'text/html; charset=utf-8'),
+                        (b'cache-control', b'no-store'),
+                    ],
+                })
+                await send({
+                    'type': 'http.response.body',
+                    'body': html.encode('utf-8'),
+                })
+                return
+            
+            # Handle OAuth authorize endpoint (POST)
+            if path == "/oauth/authorize" and scope["method"] == "POST":
+                # Read form data
+                body = b""
+                while True:
+                    message = await receive()
+                    if message["type"] == "http.request":
+                        body += message.get("body", b"")
+                        if not message.get("more_body", False):
+                            break
+                
+                # Parse form data
+                form_data = urllib.parse.parse_qs(body.decode('utf-8'))
+                
+                # Extract form fields
+                username = form_data.get('username', [''])[0]
+                password = form_data.get('password', [''])[0]
+                client_id = form_data.get('client_id', [''])[0]
+                redirect_uri = form_data.get('redirect_uri', [''])[0]
+                response_type = form_data.get('response_type', [''])[0]
+                state = form_data.get('state', [''])[0]
+                scope_param = form_data.get('scope', [''])[0]
+                
+                # Validate credentials
+                if username == OAUTH_USERNAME and password == OAUTH_PASSWORD:
+                    # Generate authorization code
+                    auth_code = secrets.token_urlsafe(32)
+                    
+                    # Store auth code with metadata (expires in 10 minutes)
+                    auth_codes[auth_code] = {
+                        'client_id': client_id,
+                        'redirect_uri': redirect_uri,
+                        'expires_at': time.time() + 600,
+                        'username': username,
+                        'scope': scope_param
+                    }
+                    
+                    # Redirect back to client with auth code
+                    redirect_params = {'code': auth_code}
+                    if state:
+                        redirect_params['state'] = state
+                    
+                    redirect_url = redirect_uri + ('&' if '?' in redirect_uri else '?') + urllib.parse.urlencode(redirect_params)
+                    
+                    await send({
+                        'type': 'http.response.start',
+                        'status': 302,
+                        'headers': [
+                            (b'location', redirect_url.encode()),
+                            (b'cache-control', b'no-store'),
+                        ],
+                    })
+                    await send({
+                        'type': 'http.response.body',
+                        'body': b'',
+                    })
+                else:
+                    # Invalid credentials - show error
+                    template_vars = {
+                        'client_name': 'claude.ai' if 'claude.ai' in redirect_uri else client_id,
+                        'client_id': client_id,
+                        'redirect_uri': redirect_uri,
+                        'redirect_url': redirect_uri,
+                        'response_type': response_type,
+                        'state': state,
+                        'scope': scope_param,
+                        'form_action': '/oauth/authorize',
+                        'error_message': 'Invalid username or password',
+                        'error_class': ''
+                    }
+                    
+                    html = LOGIN_PAGE_TEMPLATE.format(**template_vars)
+                    
+                    await send({
+                        'type': 'http.response.start',
+                        'status': 401,
+                        'headers': [
+                            (b'content-type', b'text/html; charset=utf-8'),
+                            (b'cache-control', b'no-store'),
+                        ],
+                    })
+                    await send({
+                        'type': 'http.response.body',
+                        'body': html.encode('utf-8'),
+                    })
+                return
+            
+            # Handle OAuth token endpoint
+            if path == "/oauth/token" and scope["method"] == "POST":
+                # Read body
+                body = b""
+                while True:
+                    message = await receive()
+                    if message["type"] == "http.request":
+                        body += message.get("body", b"")
+                        if not message.get("more_body", False):
+                            break
+                
+                # Parse form data
+                form_data = urllib.parse.parse_qs(body.decode('utf-8'))
+                
+                grant_type = form_data.get('grant_type', [''])[0]
+                code = form_data.get('code', [''])[0]
+                redirect_uri = form_data.get('redirect_uri', [''])[0]
+                
+                # Extract client credentials from Authorization header
+                auth_header = headers.get(b'authorization', b'').decode('utf-8')
+                client_id = None
+                client_secret = None
+                
+                if auth_header.startswith('Basic '):
+                    try:
+                        credentials = base64.b64decode(auth_header[6:]).decode('utf-8')
+                        client_id, client_secret = credentials.split(':', 1)
+                    except:
+                        pass
+                
+                if grant_type != 'authorization_code' or not code:
+                    error_response = json.dumps({'error': 'invalid_request'}).encode()
+                    await send({
+                        'type': 'http.response.start',
+                        'status': 400,
+                        'headers': [
+                            (b'content-type', b'application/json'),
+                            (b'cache-control', b'no-store'),
+                        ],
+                    })
+                    await send({
+                        'type': 'http.response.body',
+                        'body': error_response,
+                    })
+                    return
+                
+                # Validate authorization code
+                auth_data = auth_codes.get(code)
+                if not auth_data or auth_data['expires_at'] < time.time():
+                    error_response = json.dumps({'error': 'invalid_grant'}).encode()
+                    await send({
+                        'type': 'http.response.start',
+                        'status': 400,
+                        'headers': [
+                            (b'content-type', b'application/json'),
+                            (b'cache-control', b'no-store'),
+                        ],
+                    })
+                    await send({
+                        'type': 'http.response.body',
+                        'body': error_response,
+                    })
+                    return
+                
+                # Remove used auth code
+                del auth_codes[code]
+                
+                # Generate access token
+                access_token = secrets.token_urlsafe(64)
+                
+                # Store access token
+                access_tokens[access_token] = {
+                    'username': auth_data['username'],
+                    'expires_at': time.time() + 3600,  # 1 hour
+                    'scope': auth_data.get('scope', '')
+                }
+                
+                # Create token response
+                token_response = {
+                    'access_token': access_token,
+                    'token_type': 'Bearer',
+                    'expires_in': 3600,
+                    'scope': auth_data.get('scope', '')
+                }
+                
+                response_body = json.dumps(token_response).encode()
+                await send({
+                    'type': 'http.response.start',
+                    'status': 200,
+                    'headers': [
+                        (b'content-type', b'application/json'),
+                        (b'cache-control', b'no-store'),
+                    ],
+                })
+                await send({
+                    'type': 'http.response.body',
+                    'body': response_body,
                 })
                 return
             
             # Handle client registration endpoint
-            if path == "/register":
-                # Return 404 to indicate registration is not supported
+            if path == "/oauth/register" and scope["method"] == "POST":
+                # For now, we'll accept any client registration
+                # In production, you might want to validate and store client credentials
+                
+                # Read the request body
+                body = b""
+                while True:
+                    message = await receive()
+                    if message["type"] == "http.request":
+                        body += message.get("body", b"")
+                        if not message.get("more_body", False):
+                            break
+                
+                try:
+                    registration_data = json.loads(body.decode('utf-8')) if body else {}
+                except json.JSONDecodeError:
+                    registration_data = {}
+                
+                # Generate a client ID
+                client_id = secrets.token_urlsafe(16)
+                
+                # Create registration response
+                registration_response = {
+                    "client_id": client_id,
+                    "client_id_issued_at": int(time.time()),
+                    "grant_types": ["authorization_code", "refresh_token"],
+                    "response_types": ["code"],
+                    "redirect_uris": registration_data.get("redirect_uris", []),
+                    "token_endpoint_auth_method": "none"
+                }
+                
+                response_body = json.dumps(registration_response).encode()
                 await send({
                     'type': 'http.response.start',
-                    'status': 404,
-                    'headers': [(b'content-type', b'text/plain')],
+                    'status': 201,
+                    'headers': [
+                        (b'content-type', b'application/json'),
+                        (b'cache-control', b'no-store'),
+                    ],
                 })
                 await send({
                     'type': 'http.response.body',
-                    'body': b'Not Found',
+                    'body': response_body,
                 })
                 return
             
-            # Split path while preserving structure
-            path_parts = path.strip('/').split('/') if path.strip('/') else []
+            # Check Bearer token for API endpoints
+            auth_header = headers.get(b'authorization', b'').decode('utf-8')
+            token = None
             
-            # Check if path matches /{password} or /{password}/sse or /{password}/messages
-            if len(path_parts) >= 1:
-                url_password = path_parts[0]
-                # Reconstruct the actual path, preserving trailing slash and query parameters
-                remaining_parts = path_parts[1:]
-                if remaining_parts:
-                    actual_path = '/' + '/'.join(remaining_parts)
-                    # Preserve trailing slash if original had it
-                    if path.endswith('/') and not actual_path.endswith('/'):
-                        actual_path += '/'
-                else:
-                    actual_path = '/'
+            if auth_header.startswith('Bearer '):
+                token = auth_header[7:]
+            
+            # Clean up expired tokens periodically
+            cleanup_expired_tokens()
+            
+            # Validate token for protected endpoints
+            if path in ['/sse', '/messages']:
+                if not token or token not in access_tokens:
+                    # Return 401 Unauthorized
+                    await send({
+                        'type': 'http.response.start',
+                        'status': 401,
+                        'headers': [
+                            (b'content-type', b'text/plain'),
+                            (b'www-authenticate', b'Bearer'),
+                        ],
+                    })
+                    await send({
+                        'type': 'http.response.body',
+                        'body': b'Unauthorized',
+                    })
+                    return
                 
-                # Verify password
-                if url_password == MCP_PASSWORD:
-                    # Rewrite the path to remove password
-                    new_scope = scope.copy()
-                    new_scope['path'] = actual_path
-                    if 'raw_path' in scope:
-                        new_scope['raw_path'] = actual_path.encode()
-                    
-                    # For SSE endpoint, we need to intercept and modify the response
-                    if actual_path == '/sse':
-                        # Create a custom send that modifies the SSE data
-                        messages_sent = []
-                        
-                        async def modified_send(message):
-                            if message['type'] == 'http.response.body':
-                                body = message.get('body', b'')
-                                if body and b'data: /messages/' in body:
-                                    # Modify the messages URL to include password
-                                    body = body.replace(
-                                        b'data: /messages/',
-                                        f'data: /{MCP_PASSWORD}/messages/'.encode()
-                                    )
-                                    message = message.copy()
-                                    message['body'] = body
-                            
-                            await send(message)
-                        
-                        # Pass to the MCP app with modified send
-                        await mcp_app(new_scope, receive, modified_send)
-                        return
-                    
-                    # Handle root path for server info/health check
-                    if actual_path == '/' or actual_path == '':
-                        # Return server info for Claude.ai integration check
-                        await send({
-                            'type': 'http.response.start',
-                            'status': 200,
-                            'headers': [
-                                (b'content-type', b'application/json'),
-                                (b'access-control-allow-origin', b'*'),
-                            ],
-                        })
-                        server_info = {
-                            "mcp": "1.0",
-                            "name": "ticktick-mcp",
-                            "description": "TickTick MCP Server with password protection"
-                        }
-                        await send({
-                            'type': 'http.response.body',
-                            'body': json.dumps(server_info).encode(),
-                        })
-                        return
-                    
-                    # Pass to the MCP app with rewritten path
-                    await mcp_app(new_scope, receive, send)
+                # Check if token is expired
+                token_data = access_tokens[token]
+                if token_data['expires_at'] < time.time():
+                    del access_tokens[token]
+                    await send({
+                        'type': 'http.response.start',
+                        'status': 401,
+                        'headers': [
+                            (b'content-type', b'text/plain'),
+                            (b'www-authenticate', b'Bearer'),
+                        ],
+                    })
+                    await send({
+                        'type': 'http.response.body',
+                        'body': b'Token expired',
+                    })
                     return
             
-            # Return 404 if password is wrong or missing
-            await send({
-                'type': 'http.response.start',
-                'status': 404,
-                'headers': [(b'content-type', b'text/plain')],
-            })
-            await send({
-                'type': 'http.response.body',
-                'body': b'Not Found',
-            })
+            # Handle root path for server info
+            if path == '/':
+                server_info = {
+                    "mcp": "1.0",
+                    "name": "ticktick-mcp",
+                    "description": "TickTick MCP Server with OAuth authentication"
+                }
+                response_body = json.dumps(server_info).encode()
+                await send({
+                    'type': 'http.response.start',
+                    'status': 200,
+                    'headers': [
+                        (b'content-type', b'application/json'),
+                        (b'access-control-allow-origin', b'*'),
+                    ],
+                })
+                await send({
+                    'type': 'http.response.body',
+                    'body': response_body,
+                })
+                return
+            
+            # Pass to the MCP app for other paths
+            await mcp_app(scope, receive, send)
         else:
             # For non-HTTP (like WebSocket), pass through
             await mcp_app(scope, receive, send)
     
-    # Create Starlette app with our custom ASGI app
+    # Create Starlette app with our custom OAuth ASGI app
     app = Starlette(
         routes=[
-            Mount('/', app=password_protected_app),
+            Mount('/', app=oauth_app),
         ]
     )
     
     # Update the log messages
-    logger.info(f"SSE endpoint will be available at: http://{host}:{port}/{MCP_PASSWORD}/sse")
-    logger.info(f"Messages endpoint: http://{host}:{port}/{MCP_PASSWORD}/messages")
-    logger.info("To use with Claude.ai Integrations:")
-    logger.info(f"  Integration URL: https://your-domain.com/{MCP_PASSWORD}/sse")
+    logger.info(f"OAuth discovery: http://{host}:{port}/.well-known/oauth-authorization-server")
+    logger.info(f"OAuth authorize: http://{host}:{port}/oauth/authorize")
+    logger.info(f"OAuth token: http://{host}:{port}/oauth/token")
+    logger.info(f"SSE endpoint: http://{host}:{port}/sse (requires Bearer token)")
+    logger.info("\nTo use with Claude.ai Integrations:")
+    logger.info(f"  Integration URL: https://your-domain.com/sse")
+    logger.info("  Claude.ai will automatically handle OAuth flow")
     
     # Run with uvicorn
     uvicorn.run(app, host=host, port=port, log_level=log_level)
