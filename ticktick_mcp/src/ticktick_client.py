@@ -229,8 +229,27 @@ class TickTickClient:
     
     def create_task(self, title: str, project_id: str, content: str = None, 
                    start_date: str = None, due_date: str = None, 
-                   priority: int = 0, is_all_day: bool = False) -> Dict:
-        """Creates a new task."""
+                   priority: int = 0, is_all_day: bool = False,
+                   reminders: List[str] = None) -> Dict:
+        """Creates a new task with optional reminders.
+        
+        Args:
+            title: Task title
+            project_id: ID of the project
+            content: Task description (optional)
+            start_date: Start date in ISO format (optional)
+            due_date: Due date in ISO format (optional)
+            priority: Priority level 0-5 (optional)
+            is_all_day: Whether this is an all-day task (optional)
+            reminders: List of reminder triggers (optional)
+                      Format: "TRIGGER:P[n]DT[n]H[n]M[n]S"
+                      Examples: 
+                      - ["TRIGGER:PT0S"] (at time of event)
+                      - ["TRIGGER:PT15M"] (15 minutes before)
+                      - ["TRIGGER:P0DT1H0M0S"] (1 hour before)
+                      - ["TRIGGER:P1DT0H0M0S"] (1 day before)
+                      - ["TRIGGER:P0DT9H0M0S", "TRIGGER:PT0S"] (9 hours before AND at time)
+        """
         data = {
             "title": title,
             "projectId": project_id
@@ -246,13 +265,33 @@ class TickTickClient:
             data["priority"] = priority
         if is_all_day is not None:
             data["isAllDay"] = is_all_day
+        if reminders:
+            data["reminders"] = reminders
             
         return self._make_request("POST", "/task", data)
     
     def update_task(self, task_id: str, project_id: str, title: str = None, 
                    content: str = None, priority: int = None, 
-                   start_date: str = None, due_date: str = None) -> Dict:
-        """Updates an existing task."""
+                   start_date: str = None, due_date: str = None,
+                   reminders: List[str] = None) -> Dict:
+        """Updates an existing task with optional reminders.
+        
+        Args:
+            task_id: ID of the task to update
+            project_id: ID of the project
+            title: New task title (optional)
+            content: New task content (optional) 
+            priority: New priority level 0-5 (optional)
+            start_date: New start date in ISO format (optional)
+            due_date: New due date in ISO format (optional)
+            reminders: List of reminder triggers (optional)
+                      Format: "TRIGGER:P[n]DT[n]H[n]M[n]S"
+                      Examples: 
+                      - "TRIGGER:PT0S" (at time of event)
+                      - "TRIGGER:PT15M" (15 minutes before)
+                      - "TRIGGER:P0DT1H0M0S" (1 hour before)
+                      - "TRIGGER:P1DT0H0M0S" (1 day before)
+        """
         data = {
             "id": task_id,
             "projectId": project_id
@@ -268,6 +307,8 @@ class TickTickClient:
             data["startDate"] = start_date
         if due_date:
             data["dueDate"] = due_date
+        if reminders is not None:
+            data["reminders"] = reminders
             
         return self._make_request("POST", f"/task/{task_id}", data)
     

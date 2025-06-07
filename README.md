@@ -7,6 +7,7 @@ A [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server for Ti
 - 📋 View all your TickTick projects and tasks
 - ✏️ Create new projects and tasks through natural language
 - 🔄 Update existing task details (title, content, dates, priority)
+- 🔔 Set task reminders with flexible timing options
 - ✅ Mark tasks as complete
 - 🗑️ Delete tasks and projects
 - 🔄 Full integration with TickTick's open API
@@ -170,12 +171,35 @@ Once connected, you'll see the TickTick MCP server tools available in Claude, in
 | `get_project` | Get details about a specific project | `project_id` |
 | `get_project_tasks` | List all tasks in a project | `project_id` |
 | `get_task` | Get details about a specific task | `project_id`, `task_id` |
-| `create_task` | Create a new task | `title`, `project_id`, `content` (optional), `start_date` (optional), `due_date` (optional), `priority` (optional) |
-| `update_task` | Update an existing task | `task_id`, `project_id`, `title` (optional), `content` (optional), `start_date` (optional), `due_date` (optional), `priority` (optional) |
+| `create_task` | Create a new task | `title`, `project_id`, `content` (optional), `start_date` (optional), `due_date` (optional), `priority` (optional), `reminders` (optional) |
+| `update_task` | Update an existing task | `task_id`, `project_id`, `title` (optional), `content` (optional), `start_date` (optional), `due_date` (optional), `priority` (optional), `reminders` (optional) |
 | `complete_task` | Mark a task as complete | `project_id`, `task_id` |
 | `delete_task` | Delete a task | `project_id`, `task_id` |
 | `create_project` | Create a new project | `name`, `color` (optional), `view_mode` (optional) |
 | `delete_project` | Delete a project | `project_id` |
+
+### Task Reminders
+
+The TickTick MCP server supports setting reminders for tasks using the TRIGGER format. When creating or updating tasks, you can specify reminders as a list of trigger strings:
+
+**Reminder Format Examples:**
+- `"TRIGGER:PT0S"` - At the time of the event
+- `"TRIGGER:PT15M"` - 15 minutes before
+- `"TRIGGER:PT30M"` - 30 minutes before
+- `"TRIGGER:P0DT1H0M0S"` - 1 hour before
+- `"TRIGGER:P0DT2H0M0S"` - 2 hours before
+- `"TRIGGER:P1DT0H0M0S"` - 1 day before
+- `"TRIGGER:P7DT0H0M0S"` - 1 week before
+
+**Multiple Reminders:**
+You can set multiple reminders for a single task by providing a list:
+```json
+["TRIGGER:P1DT0H0M0S", "TRIGGER:P0DT1H0M0S", "TRIGGER:PT0S"]
+```
+This would remind you 1 day before, 1 hour before, and at the time of the event.
+
+**Removing Reminders:**
+To remove all reminders from a task, update it with an empty reminders list: `[]`
 
 ## Example Prompts for Claude
 
@@ -183,10 +207,28 @@ Here are some example prompts to use with Claude after connecting the TickTick M
 
 - "Show me all my TickTick projects"
 - "Create a new task called 'Finish MCP server documentation' in my work project with high priority"
+- "Create a task 'Team meeting' with reminders 1 hour and 15 minutes before the due time"
+- "Add a reminder 30 minutes before to my 'Doctor appointment' task"
 - "List all tasks in my personal project"
 - "Mark the task 'Buy groceries' as complete"
 - "Create a new project called 'Vacation Planning' with a blue color"
 - "When is my next deadline in TickTick?"
+- "Create a task 'Submit report' due tomorrow at 5 PM with reminders 1 day before and at the time"
+
+### Date and Time Zone Handling
+
+The MCP server accepts dates in ISO 8601 format with timezone offset. Claude will handle timezone conversion based on your natural language input.
+
+**Supported formats**:
+- With timezone: `2025-06-08T08:00:00+0800` (recommended)
+- UTC: `2025-06-08T00:00:00+0000`
+
+**Natural language examples**:
+- "Create a task for tomorrow at 8 AM" - Claude will use your local timezone
+- "Schedule meeting at 3 PM EST" - Claude will convert to the specified timezone
+- "Remind me in 2 hours" - Claude will calculate based on current time
+
+**Technical note**: The MCP server simply passes through the ISO 8601 formatted datetime. All timezone interpretation and conversion is handled by Claude based on context.
 
 ## Development
 

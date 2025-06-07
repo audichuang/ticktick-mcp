@@ -72,6 +72,44 @@ def format_task(task: Dict) -> str:
     status = "Completed" if task.get('status') == 2 else "Active"
     formatted += f"Status: {status}\n"
     
+    # Add reminders if available
+    reminders = task.get('reminders', [])
+    if reminders:
+        formatted += f"\nReminders:\n"
+        for reminder in reminders:
+            # Parse TRIGGER format
+            if reminder.startswith("TRIGGER:"):
+                trigger_value = reminder[8:]  # Remove "TRIGGER:"
+                if trigger_value == "PT0S":
+                    formatted += "- At time of event\n"
+                elif trigger_value.startswith("PT"):
+                    # Parse minutes/hours
+                    if "M" in trigger_value:
+                        minutes = trigger_value.replace("PT", "").replace("M", "")
+                        formatted += f"- {minutes} minutes before\n"
+                    elif "H" in trigger_value:
+                        hours = trigger_value.replace("PT", "").replace("H", "")
+                        formatted += f"- {hours} hours before\n"
+                elif trigger_value.startswith("P"):
+                    # Parse days/hours format like P0DT1H0M0S or P1DT0H0M0S
+                    if "DT" in trigger_value:
+                        parts = trigger_value.replace("P", "").split("DT")
+                        days = parts[0].replace("D", "") if parts[0] else "0"
+                        time_part = parts[1] if len(parts) > 1 else ""
+                        
+                        hours = "0"
+                        if "H" in time_part:
+                            hours = time_part.split("H")[0]
+                        
+                        if days != "0":
+                            formatted += f"- {days} day(s) before\n"
+                        elif hours != "0":
+                            formatted += f"- {hours} hour(s) before\n"
+                else:
+                    formatted += f"- {reminder}\n"
+            else:
+                formatted += f"- {reminder}\n"
+    
     # Add content if available
     if task.get('content'):
         formatted += f"\nContent:\n{task.get('content')}\n"
@@ -218,10 +256,11 @@ async def create_task(
     content: str = None, 
     start_date: str = None, 
     due_date: str = None, 
-    priority: int = 0
+    priority: int = 0,
+    reminders: List[str] = None
 ) -> str:
     """
-    Create a new task in TickTick.
+    Create a new task in TickTick with optional reminders.
     
     Args:
         title: Task title
@@ -230,6 +269,13 @@ async def create_task(
         start_date: Start date in ISO format YYYY-MM-DDThh:mm:ss+0000 (optional)
         due_date: Due date in ISO format YYYY-MM-DDThh:mm:ss+0000 (optional)
         priority: Priority level (0: None, 1: Low, 3: Medium, 5: High) (optional)
+        reminders: List of reminder triggers in TRIGGER format (optional)
+                  Examples:
+                  - ["TRIGGER:PT0S"] - At time of event
+                  - ["TRIGGER:PT15M"] - 15 minutes before
+                  - ["TRIGGER:P0DT1H0M0S"] - 1 hour before
+                  - ["TRIGGER:P1DT0H0M0S"] - 1 day before
+                  - ["TRIGGER:P0DT9H0M0S", "TRIGGER:PT0S"] - 9 hours before AND at time
     """
     if not ticktick:
         if not initialize_client():
@@ -249,13 +295,20 @@ async def create_task(
                 except ValueError:
                     return f"Invalid {date_name} format. Use ISO format: YYYY-MM-DDThh:mm:ss+0000"
         
+        # Validate reminders format if provided
+        if reminders:
+            for reminder in reminders:
+                if not reminder.startswith("TRIGGER:"):
+                    return f"Invalid reminder format: {reminder}. Must start with 'TRIGGER:'"
+        
         task = ticktick.create_task(
             title=title,
             project_id=project_id,
             content=content,
             start_date=start_date,
             due_date=due_date,
-            priority=priority
+            priority=priority,
+            reminders=reminders
         )
         
         if 'error' in task:
@@ -274,10 +327,11 @@ async def update_task(
     content: str = None,
     start_date: str = None,
     due_date: str = None,
-    priority: int = None
+    priority: int = None,
+    reminders: List[str] = None
 ) -> str:
     """
-    Update an existing task in TickTick.
+    Update an existing task in TickTick with optional reminders.
     
     Args:
         task_id: ID of the task to update
@@ -287,6 +341,13 @@ async def update_task(
         start_date: New start date in ISO format YYYY-MM-DDThh:mm:ss+0000 (optional)
         due_date: New due date in ISO format YYYY-MM-DDThh:mm:ss+0000 (optional)
         priority: New priority level (0: None, 1: Low, 3: Medium, 5: High) (optional)
+        reminders: List of reminder triggers in TRIGGER format (optional)
+                  Examples:
+                  - ["TRIGGER:PT0S"] - At time of event
+                  - ["TRIGGER:PT15M"] - 15 minutes before
+                  - ["TRIGGER:P0DT1H0M0S"] - 1 hour before
+                  - ["TRIGGER:P1DT0H0M0S"] - 1 day before
+                  - [] - Remove all reminders
     """
     if not ticktick:
         if not initialize_client():
@@ -306,6 +367,12 @@ async def update_task(
                 except ValueError:
                     return f"Invalid {date_name} format. Use ISO format: YYYY-MM-DDThh:mm:ss+0000"
         
+        # Validate reminders format if provided
+        if reminders is not None and reminders:  # Check if not None and not empty
+            for reminder in reminders:
+                if not reminder.startswith("TRIGGER:"):
+                    return f"Invalid reminder format: {reminder}. Must start with 'TRIGGER:'"
+        
         task = ticktick.update_task(
             task_id=task_id,
             project_id=project_id,
@@ -313,7 +380,8 @@ async def update_task(
             content=content,
             start_date=start_date,
             due_date=due_date,
-            priority=priority
+            priority=priority,
+            reminders=reminders
         )
         
         if 'error' in task:
