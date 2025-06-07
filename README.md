@@ -217,18 +217,24 @@ Here are some example prompts to use with Claude after connecting the TickTick M
 
 ### Date and Time Zone Handling
 
-The MCP server accepts dates in ISO 8601 format with timezone offset. Claude will handle timezone conversion based on your natural language input.
+The MCP server accepts dates in ISO 8601 format with timezone offset. **Important**: Always include the correct timezone offset to ensure tasks appear at the right time.
 
-**Supported formats**:
-- With timezone: `2025-06-08T08:00:00+0800` (recommended)
-- UTC: `2025-06-08T00:00:00+0000`
+**Common timezone offsets**:
+- Taiwan/China/Singapore: `+0800`
+- Japan/Korea: `+0900`
+- UTC: `+0000`
 
-**Natural language examples**:
-- "Create a task for tomorrow at 8 AM" - Claude will use your local timezone
-- "Schedule meeting at 3 PM EST" - Claude will convert to the specified timezone
-- "Remind me in 2 hours" - Claude will calculate based on current time
+**Correct format examples**:
+- Taiwan time 8AM: `2025-06-09T08:00:00+0800`
+- Japan time 3PM: `2025-06-09T15:00:00+0900`
+- UTC midnight: `2025-06-09T00:00:00+0000`
 
-**Technical note**: The MCP server simply passes through the ISO 8601 formatted datetime. All timezone interpretation and conversion is handled by Claude based on context.
+**Natural language tips**:
+- Be explicit: "明天早上8點台灣時間" or "8AM Taiwan time tomorrow"
+- Claude may default to UTC if timezone is unclear
+- Always verify the timezone offset in the generated command
+
+**For detailed timezone guidance, see [TIMEZONE_GUIDE.md](TIMEZONE_GUIDE.md)**
 
 ## Development
 

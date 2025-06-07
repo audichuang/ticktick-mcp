@@ -261,8 +261,8 @@ async def create_task(
         title: Task title
         project_id: ID of the project to add the task to
         content: Task description/content (optional)
-        start_date: Start date in ISO format YYYY-MM-DDThh:mm:ss+0000 (optional)
-        due_date: Due date in ISO format YYYY-MM-DDThh:mm:ss+0000 (optional)
+        start_date: Start date in ISO format with timezone (e.g., 2025-06-09T08:00:00+0800 for 8AM Taiwan time) (optional)
+        due_date: Due date in ISO format with timezone (e.g., 2025-06-09T08:00:00+0800 for 8AM Taiwan time) (optional)
         priority: Priority level (0: None, 1: Low, 3: Medium, 5: High) (optional)
         reminders: List of reminder triggers in TRIGGER format (optional)
                   Examples:
@@ -329,8 +329,8 @@ async def update_task(
         project_id: ID of the project the task belongs to
         title: New task title (optional)
         content: New task description/content (optional)
-        start_date: New start date in ISO format YYYY-MM-DDThh:mm:ss+0000 (optional)
-        due_date: New due date in ISO format YYYY-MM-DDThh:mm:ss+0000 (optional)
+        start_date: New start date in ISO format with timezone (e.g., 2025-06-09T08:00:00+0800 for 8AM Taiwan time) (optional)
+        due_date: New due date in ISO format with timezone (e.g., 2025-06-09T08:00:00+0800 for 8AM Taiwan time) (optional)
         priority: New priority level (0: None, 1: Low, 3: Medium, 5: High) (optional)
         reminders: List of reminder triggers in TRIGGER format (optional)
                   Examples:
