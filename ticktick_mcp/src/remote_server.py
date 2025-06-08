@@ -22,7 +22,11 @@ load_dotenv()
 
 # OAuth configuration
 OAUTH_USERNAME = os.getenv("OAUTH_USERNAME", "admin")
-OAUTH_PASSWORD = os.getenv("OAUTH_PASSWORD", "password")
+OAUTH_PASSWORD = os.getenv("OAUTH_PASSWORD", "ticktick-mcp-password")
+
+# Log warning if using default password
+if OAUTH_PASSWORD == "ticktick-mcp-password":
+    logger.warning("⚠️  Using default password! Please set OAUTH_PASSWORD environment variable for security.")
 
 # In-memory storage for OAuth
 auth_codes = {}  # code -> {client_id, redirect_uri, expires_at, username}
@@ -759,7 +763,11 @@ def run_remote_server(
 ):
     """Run the remote server with SSE support and OAuth authentication."""
     logger.info(f"Starting TickTick MCP Remote Server with OAuth on {host}:{port}")
-    logger.info(f"OAuth username: {OAUTH_USERNAME}")
+    logger.info("=" * 60)
+    logger.info("🔐 OAuth Credentials:")
+    logger.info(f"   Username: {OAUTH_USERNAME}")
+    logger.info(f"   Password: {OAUTH_PASSWORD}")
+    logger.info("=" * 60)
     
     # Run the server with SSE transport using FastMCP's built-in method
     # Set environment variables for uvicorn
@@ -1210,6 +1218,11 @@ def run_remote_server(
     logger.info("\nTo use with Claude.ai Integrations:")
     logger.info(f"  Integration URL: https://your-domain.com/sse")
     logger.info("  Claude.ai will automatically handle OAuth flow")
+    logger.info("\n" + "=" * 60)
+    logger.info("🔑 Login with these credentials:")
+    logger.info(f"   Username: {OAUTH_USERNAME}")
+    logger.info(f"   Password: {OAUTH_PASSWORD}")
+    logger.info("=" * 60 + "\n")
     
     # Run with uvicorn
     uvicorn.run(app, host=host, port=port, log_level=log_level)
