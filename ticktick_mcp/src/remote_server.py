@@ -6,12 +6,15 @@ import time
 import secrets
 import urllib.parse
 import base64
+import re
 from datetime import datetime, timezone
 from typing import Dict, List, Any, Optional
 from dotenv import load_dotenv
 
 from mcp.server.fastmcp import FastMCP
 from .ticktick_client import TickTickClient
+from .ics_sync import ICSSyncEngine, FilterManager, ConflictResolver, start_scheduler, get_scheduler
+from .ics_sync.models import ICSSource, FilterRule, SyncConflict, get_db_session, init_db
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -24,9 +27,17 @@ load_dotenv()
 OAUTH_USERNAME = os.getenv("OAUTH_USERNAME", "admin")
 OAUTH_PASSWORD = os.getenv("OAUTH_PASSWORD", "ticktick-mcp-password")
 
+# OAuth Client Credentials for direct authentication (no user login redirect)
+OAUTH_CLIENT_ID = os.getenv("OAUTH_CLIENT_ID", "ticktick-mcp-client")
+OAUTH_CLIENT_SECRET = os.getenv("OAUTH_CLIENT_SECRET", "default-client-secret")
+
 # Log warning if using default password
 if OAUTH_PASSWORD == "ticktick-mcp-password":
     logger.warning("⚠️  Using default password! Please set OAUTH_PASSWORD environment variable for security.")
+
+# Log warning if using default client secret
+if OAUTH_CLIENT_SECRET == "default-client-secret":
+    logger.warning("⚠️  Using default Client Secret! Please set OAUTH_CLIENT_SECRET environment variable for security.")
 
 # In-memory storage for OAuth
 auth_codes = {}  # code -> {client_id, redirect_uri, expires_at, username}
@@ -37,6 +48,125 @@ mcp = FastMCP("ticktick-remote")
 
 # Create TickTick client
 ticktick = None
+
+# Timezone offset mapping for smart timezone detection (same as server.py)
+TIMEZONE_OFFSET_MAP = {
+    "+0800": "Asia/Taipei",      # Taiwan, China, Singapore
+    "+0900": "Asia/Tokyo",       # Japan, Korea  
+    "+0000": "UTC",              # UTC
+    "-0500": "America/New_York", # US Eastern (EST)
+    "-0400": "America/New_York", # US Eastern (EDT)
+    "-0800": "America/Los_Angeles", # US Pacific (PST)
+    "-0700": "America/Los_Angeles", # US Pacific (PDT)
+    "+0100": "Europe/London",    # UK (BST)
+}
+
+def infer_timezone_from_date(date_string: str) -> Optional[str]:
+    """
+    Extract timezone from ISO date string and map to timezone name.
+    
+    Args:
+        date_string: ISO 8601 date string (e.g., "2025-06-09T08:00:00+0800")
+    
+    Returns:
+        Timezone name (e.g., "Asia/Taipei") or None if not found
+    """
+    if not date_string:
+        return None
+    
+    # Extract timezone offset using regex
+    timezone_pattern = r'([+-]\d{4})$'
+    match = re.search(timezone_pattern, date_string)
+    
+    if match:
+        offset = match.group(1)
+        return TIMEZONE_OFFSET_MAP.get(offset)
+    
+    return None
+
+def normalize_timezone_format(date_string: str) -> str:
+    """
+    Normalize timezone format in ISO date string to TickTick API compatible format.
+    
+    Converts:
+    - "2025-09-20T12:00:00+08:00" -> "2025-09-20T12:00:00+0800"
+    - "2025-09-20T12:00:00+8:00" -> "2025-09-20T12:00:00+0800" 
+    - "2025-09-20T12:00:00+8" -> "2025-09-20T12:00:00+0800"
+    
+    Args:
+        date_string: ISO 8601 date string
+    
+    Returns:
+        Date string with normalized timezone format
+    """
+    if not date_string:
+        return date_string
+    
+    # Pattern to match timezone with colon: +08:00, -05:00, +8:00, etc.
+    import re
+    
+    # Match timezone patterns at the end of the string
+    timezone_pattern = r'([+-])(\d{1,2}):?(\d{2})?$'
+    match = re.search(timezone_pattern, date_string)
+    
+    if match:
+        sign = match.group(1)  # + or -
+        hours = match.group(2).zfill(2)  # Ensure 2 digits
+        minutes = match.group(3) or "00"  # Default to 00 if not present
+        
+        # Remove the original timezone part
+        base_date = date_string[:match.start()]
+        
+        # Add normalized timezone format
+        normalized_date = f"{base_date}{sign}{hours}{minutes}"
+        return normalized_date
+    
+    # If no colon format found, try to fix single digit timezones like +8
+    single_digit_pattern = r'([+-])(\d)$'
+    match = re.search(single_digit_pattern, date_string)
+    
+    if match:
+        sign = match.group(1)
+        hours = match.group(2).zfill(2)  # Convert 8 to 08
+        
+        # Remove the original timezone part
+        base_date = date_string[:match.start()]
+        
+        # Add normalized timezone format
+        normalized_date = f"{base_date}{sign}{hours}00"
+        return normalized_date
+    
+    return date_string
+
+def get_smart_timezone(time_zone: str, start_date: str, due_date: str) -> Optional[str]:
+    """
+    Get the best timezone for the task using smart inference.
+    
+    Args:
+        time_zone: Explicitly provided timezone
+        start_date: Start date string
+        due_date: Due date string
+    
+    Returns:
+        Best timezone name to use
+    """
+    # If explicitly provided, use that
+    if time_zone:
+        return time_zone
+    
+    # Try to infer from start_date
+    if start_date:
+        inferred = infer_timezone_from_date(start_date)
+        if inferred:
+            return inferred
+    
+    # Try to infer from due_date
+    if due_date:
+        inferred = infer_timezone_from_date(due_date)
+        if inferred:
+            return inferred
+    
+    return None
 
 def initialize_client():
     """Initialize the TickTick client with credentials."""
@@ -58,6 +188,19 @@ def initialize_client():
             return False
             
         logger.info(f"Successfully connected to TickTick API with {len(projects)} projects")
+        
+        # Initialize ICS sync database
+        try:
+            init_db()
+            logger.info("ICS sync database initialized")
+            
+            # Start ICS sync scheduler
+            scheduler = start_scheduler(ticktick)
+            if scheduler:
+                logger.info("ICS sync scheduler started")
+        except Exception as e:
+            logger.error(f"Failed to initialize ICS sync: {e}")
+        
         return True
     except Exception as e:
         logger.error(f"Failed to initialize TickTick client: {e}")
@@ -256,18 +399,40 @@ async def create_task(
     start_date: str = None, 
     due_date: str = None, 
     priority: int = 0,
+    is_all_day: bool = False,
+    time_zone: str = None,
     reminders: List[str] = None
 ) -> str:
     """
-    Create a new task in TickTick with optional reminders.
+    Create a new task in TickTick with optional reminders and timezone support.
     
     Args:
         title: Task title
         project_id: ID of the project to add the task to
         content: Task description/content (optional)
-        start_date: Start date in ISO format with timezone (e.g., 2025-06-09T08:00:00+0800 for 8AM Taiwan time) (optional)
-        due_date: Due date in ISO format with timezone (e.g., 2025-06-09T08:00:00+0800 for 8AM Taiwan time) (optional)
+        start_date: Start date in ISO format with timezone (optional)
+                   Examples:
+                   - "2025-06-09T08:00:00+0800" (8AM Taiwan time)
+                   - "2025-06-09T14:00:00+08:00" (also supported, will be normalized)
+                   - "2025-06-09T09:00:00-0500" (9AM US Eastern)
+                   Note: Both +0800 and +08:00 formats are accepted
+        due_date: Due date in ISO format with timezone (optional)
+                 Examples:
+                 - "2025-06-09T18:00:00+0800" (6PM Taiwan time)
+                 - "2025-06-09T18:00:00+08:00" (also supported, will be normalized)
+                 - "2025-06-09T17:00:00-0500" (5PM US Eastern)
+                 Note: Both +0800 and +08:00 formats are accepted
         priority: Priority level (0: None, 1: Low, 3: Medium, 5: High) (optional)
+        is_all_day: Whether this is an all-day task (default: False) (optional)
+        time_zone: Timezone for the task (optional)
+                  Common timezones:
+                  - "Asia/Taipei" (Taiwan, UTC+8)
+                  - "Asia/Tokyo" (Japan, UTC+9) 
+                  - "Asia/Shanghai" (China, UTC+8)
+                  - "America/New_York" (US Eastern)
+                  - "America/Los_Angeles" (US Pacific)
+                  - "Europe/London" (UK)
+                  If not provided, timezone will be inferred from the date format
         reminders: List of reminder triggers in TRIGGER format (optional)
                   Examples:
                   - ["TRIGGER:PT0S"] - At time of event
@@ -296,13 +461,22 @@ async def create_task(
                 if not reminder.startswith("TRIGGER:"):
                     return f"Invalid reminder format: {reminder}. Must start with 'TRIGGER:'"
         
+        # Normalize timezone format in dates before sending to API
+        normalized_start_date = normalize_timezone_format(start_date) if start_date else None
+        normalized_due_date = normalize_timezone_format(due_date) if due_date else None
+        
+        # Get smart timezone
+        smart_timezone = get_smart_timezone(time_zone, normalized_start_date, normalized_due_date)
+        
         task = ticktick.create_task(
             title=title,
             project_id=project_id,
             content=content,
-            start_date=start_date,
-            due_date=due_date,
+            start_date=normalized_start_date,
+            due_date=normalized_due_date,
             priority=priority,
+            is_all_day=is_all_day,
+            time_zone=smart_timezone,
             reminders=reminders
         )
         
@@ -323,19 +497,41 @@ async def update_task(
     start_date: str = None,
     due_date: str = None,
     priority: int = None,
+    is_all_day: bool = None,
+    time_zone: str = None,
     reminders: List[str] = None
 ) -> str:
     """
-    Update an existing task in TickTick with optional reminders.
+    Update an existing task in TickTick with optional reminders and timezone support.
     
     Args:
         task_id: ID of the task to update
         project_id: ID of the project the task belongs to
         title: New task title (optional)
         content: New task description/content (optional)
-        start_date: New start date in ISO format with timezone (e.g., 2025-06-09T08:00:00+0800 for 8AM Taiwan time) (optional)
-        due_date: New due date in ISO format with timezone (e.g., 2025-06-09T08:00:00+0800 for 8AM Taiwan time) (optional)
+        start_date: New start date in ISO format with timezone (optional)
+                   Examples:
+                   - "2025-06-09T08:00:00+0800" (8AM Taiwan time)
+                   - "2025-06-09T14:00:00+08:00" (also supported, will be normalized)
+                   - "2025-06-09T09:00:00-0500" (9AM US Eastern)
+                   Note: Both +0800 and +08:00 formats are accepted
+        due_date: New due date in ISO format with timezone (optional)
+                 Examples:
+                 - "2025-06-09T18:00:00+0800" (6PM Taiwan time)
+                 - "2025-06-09T18:00:00+08:00" (also supported, will be normalized)
+                 - "2025-06-09T17:00:00-0500" (5PM US Eastern)
+                 Note: Both +0800 and +08:00 formats are accepted
         priority: New priority level (0: None, 1: Low, 3: Medium, 5: High) (optional)
+        is_all_day: Whether this is an all-day task (optional)
+        time_zone: Timezone for the task (optional)
+                  Common timezones:
+                  - "Asia/Taipei" (Taiwan, UTC+8)
+                  - "Asia/Tokyo" (Japan, UTC+9) 
+                  - "Asia/Shanghai" (China, UTC+8)
+                  - "America/New_York" (US Eastern)
+                  - "America/Los_Angeles" (US Pacific)
+                  - "Europe/London" (UK)
+                  If not provided, timezone will be inferred from the date format
         reminders: List of reminder triggers in TRIGGER format (optional)
                   Examples:
                   - ["TRIGGER:PT0S"] - At time of event
@@ -364,14 +560,23 @@ async def update_task(
                 if not reminder.startswith("TRIGGER:"):
                     return f"Invalid reminder format: {reminder}. Must start with 'TRIGGER:'"
         
+        # Normalize timezone format in dates before sending to API
+        normalized_start_date = normalize_timezone_format(start_date) if start_date else None
+        normalized_due_date = normalize_timezone_format(due_date) if due_date else None
+        
+        # Get smart timezone
+        smart_timezone = get_smart_timezone(time_zone, normalized_start_date, normalized_due_date)
+        
         task = ticktick.update_task(
             task_id=task_id,
             project_id=project_id,
             title=title,
             content=content,
-            start_date=start_date,
-            due_date=due_date,
+            start_date=normalized_start_date,
+            due_date=normalized_due_date,
             priority=priority,
+            is_all_day=is_all_day,
+            time_zone=smart_timezone,
             reminders=reminders
         )
         
@@ -486,6 +691,327 @@ async def delete_project(project_id: str) -> str:
     except Exception as e:
         logger.error(f"Error in delete_project: {e}")
         return f"Error deleting project: {str(e)}"
+
+# ICS Sync MCP Tools
+@mcp.tool()
+async def add_ics_source(
+    name: str,
+    url: str,
+    project_id: str,
+    sync_interval: int = 3600
+) -> str:
+    """
+    Add a new ICS calendar source for synchronization.
+    
+    Args:
+        name: Display name for the ICS source
+        url: ICS calendar URL (e.g., Outlook calendar URL)
+        project_id: TickTick project ID to sync events to
+        sync_interval: Sync interval in seconds (default: 3600 = 1 hour)
+    """
+    if not ticktick:
+        if not initialize_client():
+            return "Failed to initialize TickTick client. Please check your API credentials."
+    
+    try:
+        db_session = get_db_session()
+        
+        # Check if project exists
+        projects = ticktick.get_projects()
+        project_exists = any(p.get('id') == project_id for p in projects)
+        if not project_exists:
+            return f"Project {project_id} not found. Please create the project first."
+        
+        # Create ICS source
+        source = ICSSource(
+            name=name,
+            url=url,
+            project_id=project_id,
+            sync_interval=sync_interval,
+            enabled=True
+        )
+        
+        db_session.add(source)
+        db_session.commit()
+        
+        # Add to scheduler
+        scheduler = get_scheduler()
+        if scheduler:
+            scheduler.add_source(source.id)
+        
+        return f"✅ ICS source '{name}' added successfully!\n\n" \
+               f"📋 **Details**:\n" \
+               f"• Name: {name}\n" \
+               f"• URL: {url}\n" \
+               f"• Project: {project_id}\n" \
+               f"• Sync Interval: {sync_interval} seconds\n" \
+               f"• Status: Enabled\n\n" \
+               f"🔄 Next sync will happen automatically within {sync_interval} seconds."
+        
+    except Exception as e:
+        logger.error(f"Error in add_ics_source: {e}")
+        return f"Error adding ICS source: {str(e)}"
+
+@mcp.tool()
+async def sync_ics_now(source_id: int = None) -> str:
+    """
+    Trigger immediate synchronization for an ICS source or all sources.
+    
+    Args:
+        source_id: ID of specific source to sync, or None for all sources
+    """
+    if not ticktick:
+        if not initialize_client():
+            return "Failed to initialize TickTick client. Please check your API credentials."
+    
+    try:
+        scheduler = get_scheduler()
+        if not scheduler:
+            return "❌ ICS sync scheduler not available."
+        
+        if source_id:
+            result = scheduler.sync_now(source_id)
+            if 'error' in result:
+                return f"❌ **Sync failed**: {result['error']}"
+            
+            stats = result.get('stats', {})
+            return f"✅ **Sync completed for source {source_id}**\n\n" \
+                   f"📊 **Statistics**:\n" \
+                   f"• Events created: {stats.get('created', 0)}\n" \
+                   f"• Events updated: {stats.get('updated', 0)}\n" \
+                   f"• Events deleted: {stats.get('deleted', 0)}\n" \
+                   f"• Conflicts detected: {stats.get('conflicts', 0)}\n\n" \
+                   f"🕐 Completed at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        else:
+            result = scheduler.sync_now()
+            total_stats = result.get('total_stats', {})
+            
+            return f"✅ **Sync completed for all sources**\n\n" \
+                   f"📊 **Total Statistics**:\n" \
+                   f"• Sources synced: {result.get('total_sources', 0)}\n" \
+                   f"• Events created: {total_stats.get('created', 0)}\n" \
+                   f"• Events updated: {total_stats.get('updated', 0)}\n" \
+                   f"• Events deleted: {total_stats.get('deleted', 0)}\n" \
+                   f"• Conflicts detected: {total_stats.get('conflicts', 0)}\n\n" \
+                   f"🕐 Completed at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        
+    except Exception as e:
+        logger.error(f"Error in sync_ics_now: {e}")
+        return f"Error triggering sync: {str(e)}"
+
+@mcp.tool()
+async def get_ics_sync_status(source_id: int = None) -> str:
+    """
+    Get synchronization status for ICS sources.
+    
+    Args:
+        source_id: ID of specific source, or None for all sources
+    """
+    if not ticktick:
+        if not initialize_client():
+            return "Failed to initialize TickTick client. Please check your API credentials."
+    
+    try:
+        sync_engine = ICSSyncEngine(ticktick)
+        status = sync_engine.get_sync_status(source_id)
+        
+        if 'error' in status:
+            return f"❌ Error getting status: {status['error']}"
+        
+        result = f"📊 **ICS Sync Status**\n\n"
+        
+        for source_status in status['sources']:
+            result += f"📋 **{source_status['name']}** (ID: {source_status['id']})\n"
+            result += f"• URL: {source_status['url']}\n"
+            result += f"• Status: {'🟢 Enabled' if source_status['enabled'] else '🔴 Disabled'}\n"
+            result += f"• Sync Interval: {source_status['sync_interval']} seconds\n"
+            result += f"• Last Sync: {source_status['last_sync'] or 'Never'}\n"
+            result += f"• Synced Tasks: {source_status['mapping_count']}\n"
+            result += f"• Pending Conflicts: {source_status['pending_conflicts']}\n"
+            
+            if source_status.get('latest_sync'):
+                sync_info = source_status['latest_sync']
+                result += f"• Latest Sync Status: {sync_info['status']}\n"
+                result += f"• Events Processed: {sync_info['events_processed']}\n"
+                result += f"• Events Created: {sync_info['events_created']}\n"
+                result += f"• Events Updated: {sync_info['events_updated']}\n"
+                
+                if sync_info.get('error_message'):
+                    result += f"• Last Error: {sync_info['error_message']}\n"
+            
+            result += "\n"
+        
+        # Add scheduler status
+        scheduler = get_scheduler()
+        if scheduler:
+            scheduler_status = scheduler.get_scheduler_status()
+            result += f"🔄 **Scheduler Status**: {'🟢 Running' if scheduler_status['running'] else '🔴 Stopped'}\n"
+            result += f"📅 **Active Jobs**: {scheduler_status['job_count']}\n"
+        
+        return result
+        
+    except Exception as e:
+        logger.error(f"Error in get_ics_sync_status: {e}")
+        return f"Error getting sync status: {str(e)}"
+
+@mcp.tool()
+async def manage_ics_filter_rules(
+    source_id: int,
+    action: str,
+    rule_type: str = None,
+    rule_value: str = None
+) -> str:
+    """
+    Manage filter rules for an ICS source.
+    
+    Args:
+        source_id: ID of the ICS source
+        action: Action to perform ('add', 'list', 'remove', 'clear')
+        rule_type: Type of filter rule ('exclude_keyword', 'include_attendee', 'time_range')
+        rule_value: Value for the filter rule (JSON string for complex rules)
+    """
+    if not ticktick:
+        if not initialize_client():
+            return "Failed to initialize TickTick client. Please check your API credentials."
+    
+    try:
+        db_session = get_db_session()
+        source = db_session.query(ICSSource).filter_by(id=source_id).first()
+        
+        if not source:
+            return f"❌ ICS source {source_id} not found."
+        
+        if action == 'list':
+            rules = db_session.query(FilterRule).filter_by(source_id=source_id).all()
+            
+            if not rules:
+                return f"📋 **Filter Rules for '{source.name}'**\n\nNo filter rules configured."
+            
+            result = f"📋 **Filter Rules for '{source.name}'**\n\n"
+            for i, rule in enumerate(rules, 1):
+                status = "🟢 Enabled" if rule.enabled else "🔴 Disabled"
+                result += f"{i}. **{rule.rule_type}** {status}\n"
+                result += f"   Value: {rule.rule_value}\n"
+                result += f"   Created: {rule.created_at.strftime('%Y-%m-%d %H:%M')}\n\n"
+            
+            return result
+        
+        elif action == 'add':
+            if not rule_type or not rule_value:
+                return "❌ rule_type and rule_value are required for 'add' action."
+            
+            # Create new filter rule
+            filter_rule = FilterRule(
+                source_id=source_id,
+                rule_type=rule_type,
+                rule_value=rule_value,
+                enabled=True
+            )
+            
+            db_session.add(filter_rule)
+            db_session.commit()
+            
+            return f"✅ **Filter rule added to '{source.name}'**\n\n" \
+                   f"• Type: {rule_type}\n" \
+                   f"• Value: {rule_value}\n" \
+                   f"• Status: Enabled\n\n" \
+                   f"💡 The rule will be applied in the next sync cycle."
+        
+        elif action == 'clear':
+            rules = db_session.query(FilterRule).filter_by(source_id=source_id).all()
+            count = len(rules)
+            
+            for rule in rules:
+                db_session.delete(rule)
+            
+            db_session.commit()
+            
+            return f"✅ **Cleared all filter rules for '{source.name}'**\n\n" \
+                   f"Removed {count} filter rules."
+        
+        else:
+            return f"❌ Invalid action '{action}'. Use: add, list, clear"
+        
+    except Exception as e:
+        logger.error(f"Error in manage_ics_filter_rules: {e}")
+        return f"Error managing filter rules: {str(e)}"
+
+@mcp.tool()
+async def get_ics_conflicts(source_id: int = None) -> str:
+    """
+    Get pending synchronization conflicts.
+    
+    Args:
+        source_id: ID of specific source, or None for all sources
+    """
+    if not ticktick:
+        if not initialize_client():
+            return "Failed to initialize TickTick client. Please check your API credentials."
+    
+    try:
+        conflict_resolver = ConflictResolver(ticktick)
+        conflicts = conflict_resolver.get_pending_conflicts(source_id)
+        
+        if not conflicts:
+            return "🎉 **No pending conflicts**\n\nAll ICS sources are synchronized without conflicts."
+        
+        result = f"⚠️ **Pending Sync Conflicts** ({len(conflicts)} total)\n\n"
+        
+        for conflict in conflicts:
+            source = conflict.source_id
+            result += f"🔴 **Conflict #{conflict.id}**\n"
+            result += f"• Source ID: {source}\n"
+            result += f"• ICS UID: {conflict.ics_uid}\n"
+            result += f"• TickTick Task: {conflict.ticktick_task_id}\n"
+            result += f"• Type: {conflict.conflict_type}\n"
+            result += f"• Detected: {conflict.detected_at.strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+        
+        result += "💡 **How to resolve**:\n"
+        result += "Use `resolve_ics_conflict(conflict_id, resolution)` to resolve conflicts.\n"
+        result += "Available resolutions: 'keep_ics', 'keep_ticktick', 'keep_both', 'delete_both'"
+        
+        return result
+        
+    except Exception as e:
+        logger.error(f"Error in get_ics_conflicts: {e}")
+        return f"Error getting conflicts: {str(e)}"
+
+@mcp.tool()
+async def resolve_ics_conflict(
+    conflict_id: int,
+    resolution: str
+) -> str:
+    """
+    Resolve a synchronization conflict.
+    
+    Args:
+        conflict_id: ID of the conflict to resolve
+        resolution: Resolution strategy ('keep_ics', 'keep_ticktick', 'keep_both', 'delete_both')
+    """
+    if not ticktick:
+        if not initialize_client():
+            return "Failed to initialize TickTick client. Please check your API credentials."
+    
+    if resolution not in ['keep_ics', 'keep_ticktick', 'keep_both', 'delete_both']:
+        return "❌ Invalid resolution. Use: keep_ics, keep_ticktick, keep_both, delete_both"
+    
+    try:
+        conflict_resolver = ConflictResolver(ticktick)
+        success = conflict_resolver.resolve_conflict(conflict_id, resolution)
+        
+        if success:
+            return f"✅ **Conflict resolved successfully**\n\n" \
+                   f"• Conflict ID: {conflict_id}\n" \
+                   f"• Resolution: {resolution}\n" \
+                   f"• Resolved at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n" \
+                   f"The conflict has been resolved according to your chosen strategy."
+        else:
+            return f"❌ **Failed to resolve conflict {conflict_id}**\n\n" \
+                   f"Please check the logs for more details or try a different resolution strategy."
+        
+    except Exception as e:
+        logger.error(f"Error in resolve_ics_conflict: {e}")
+        return f"Error resolving conflict: {str(e)}"
 
 # Initialize client on module load (non-blocking)
 # Client will be initialized on first request if needed
@@ -820,7 +1346,7 @@ def run_remote_server(
                     "scopes_supported": ["mcp"],
                     "response_types_supported": ["code"],
                     "response_modes_supported": ["query"],
-                    "grant_types_supported": ["authorization_code", "refresh_token"],
+                    "grant_types_supported": ["authorization_code", "client_credentials", "refresh_token"],
                     "token_endpoint_auth_methods_supported": ["client_secret_basic", "client_secret_post", "none"],
                     "revocation_endpoint": f"{issuer_url}/oauth/token",
                     "code_challenge_methods_supported": ["plain", "S256"]
@@ -1000,19 +1526,90 @@ def run_remote_server(
                 code = form_data.get('code', [''])[0]
                 redirect_uri = form_data.get('redirect_uri', [''])[0]
                 
-                # Extract client credentials from Authorization header
+                # Extract client credentials from Authorization header or form data
                 auth_header = headers.get(b'authorization', b'').decode('utf-8')
-                client_id = None
-                client_secret = None
+                client_id = form_data.get('client_id', [''])[0]
+                client_secret = form_data.get('client_secret', [''])[0]
                 
-                if auth_header.startswith('Basic '):
+                # Try Authorization header if not in form data
+                if not client_id and not client_secret and auth_header.startswith('Basic '):
                     try:
                         credentials = base64.b64decode(auth_header[6:]).decode('utf-8')
                         client_id, client_secret = credentials.split(':', 1)
                     except:
                         pass
                 
-                if grant_type != 'authorization_code' or not code:
+                # Handle different grant types
+                if grant_type == 'client_credentials':
+                    # Client Credentials Grant - direct authentication with client ID and secret
+                    if not client_id or not client_secret:
+                        error_response = json.dumps({'error': 'invalid_client', 'error_description': 'Client credentials required'}).encode()
+                        await send({
+                            'type': 'http.response.start',
+                            'status': 400,
+                            'headers': [
+                                (b'content-type', b'application/json'),
+                                (b'cache-control', b'no-store'),
+                            ],
+                        })
+                        await send({
+                            'type': 'http.response.body',
+                            'body': error_response,
+                        })
+                        return
+                    
+                    # Validate client credentials
+                    if client_id != OAUTH_CLIENT_ID or client_secret != OAUTH_CLIENT_SECRET:
+                        error_response = json.dumps({'error': 'invalid_client', 'error_description': 'Invalid client credentials'}).encode()
+                        await send({
+                            'type': 'http.response.start',
+                            'status': 401,
+                            'headers': [
+                                (b'content-type', b'application/json'),
+                                (b'cache-control', b'no-store'),
+                            ],
+                        })
+                        await send({
+                            'type': 'http.response.body',
+                            'body': error_response,
+                        })
+                        return
+                    
+                    # Generate access token for client credentials
+                    access_token = secrets.token_urlsafe(64)
+                    
+                    # Store access token (longer expiry for client credentials)
+                    access_tokens[access_token] = {
+                        'client_id': client_id,
+                        'expires_at': time.time() + 7200,  # 2 hours for client credentials
+                        'scope': 'mcp',
+                        'grant_type': 'client_credentials'
+                    }
+                    
+                    # Create token response
+                    token_response = {
+                        'access_token': access_token,
+                        'token_type': 'Bearer',
+                        'expires_in': 7200,
+                        'scope': 'mcp'
+                    }
+                    
+                    response_body = json.dumps(token_response).encode()
+                    await send({
+                        'type': 'http.response.start',
+                        'status': 200,
+                        'headers': [
+                            (b'content-type', b'application/json'),
+                            (b'cache-control', b'no-store'),
+                        ],
+                    })
+                    await send({
+                        'type': 'http.response.body',
+                        'body': response_body,
+                    })
+                    return
+                    
+                elif grant_type != 'authorization_code' or not code:
                     error_response = json.dumps({'error': 'invalid_request'}).encode()
                     await send({
                         'type': 'http.response.start',
@@ -1175,6 +1772,199 @@ def run_remote_server(
                     })
                     return
             
+            # Handle simple login for web management interface
+            if path == '/api/login' and scope["method"] == "POST":
+                # Read request body
+                body = b""
+                while True:
+                    message = await receive()
+                    if message["type"] == "http.request":
+                        body += message.get("body", b"")
+                        if not message.get("more_body", False):
+                            break
+                
+                try:
+                    request_data = json.loads(body.decode('utf-8'))
+                    username = request_data.get('username')
+                    password = request_data.get('password')
+                    
+                    # Simple authentication check
+                    if username == OAUTH_USERNAME and password == OAUTH_PASSWORD:
+                        # Generate a simple token
+                        token = base64.b64encode(f"{username}:{int(time.time())}".encode()).decode()
+                        
+                        # Store token with expiration (24 hours)
+                        access_tokens[token] = {
+                            'username': username,
+                            'expires_at': time.time() + 86400,  # 24 hours
+                            'scope': 'web'
+                        }
+                        
+                        response_data = json.dumps({
+                            'success': True,
+                            'token': token,
+                            'username': username
+                        }).encode()
+                        
+                        await send({
+                            'type': 'http.response.start',
+                            'status': 200,
+                            'headers': [
+                                (b'content-type', b'application/json'),
+                                (b'access-control-allow-origin', b'*'),
+                            ],
+                        })
+                        await send({
+                            'type': 'http.response.body',
+                            'body': response_data,
+                        })
+                        return
+                    else:
+                        # Invalid credentials
+                        response_data = json.dumps({
+                            'success': False,
+                            'error': 'Invalid credentials'
+                        }).encode()
+                        
+                        await send({
+                            'type': 'http.response.start',
+                            'status': 401,
+                            'headers': [
+                                (b'content-type', b'application/json'),
+                                (b'access-control-allow-origin', b'*'),
+                            ],
+                        })
+                        await send({
+                            'type': 'http.response.body',
+                            'body': response_data,
+                        })
+                        return
+                        
+                except json.JSONDecodeError:
+                    response_data = json.dumps({
+                        'success': False,
+                        'error': 'Invalid JSON'
+                    }).encode()
+                    
+                    await send({
+                        'type': 'http.response.start',
+                        'status': 400,
+                        'headers': [
+                            (b'content-type', b'application/json'),
+                            (b'access-control-allow-origin', b'*'),
+                        ],
+                    })
+                    await send({
+                        'type': 'http.response.body',
+                        'body': response_data,
+                    })
+                    return
+            
+            # Handle web management interface API
+            if path.startswith('/tools/call') and scope["method"] == "POST":
+                # Read request body
+                body = b""
+                while True:
+                    message = await receive()
+                    if message["type"] == "http.request":
+                        body += message.get("body", b"")
+                        if not message.get("more_body", False):
+                            break
+                
+                try:
+                    request_data = json.loads(body.decode('utf-8'))
+                    tool_name = request_data.get('name')
+                    tool_args = request_data.get('arguments', {})
+                    
+                    # Route to appropriate MCP tool
+                    result = None
+                    if tool_name == 'get_ics_sync_status':
+                        # For web interface, return structured data instead of formatted string
+                        if not ticktick:
+                            if not initialize_client():
+                                result = {'error': 'Failed to initialize TickTick client'}
+                            else:
+                                sync_engine = ICSSyncEngine(ticktick)
+                                status = sync_engine.get_sync_status(tool_args.get('source_id'))
+                                result = status
+                        else:
+                            sync_engine = ICSSyncEngine(ticktick)
+                            status = sync_engine.get_sync_status(tool_args.get('source_id'))
+                            result = status
+                    elif tool_name == 'add_ics_source':
+                        result = await add_ics_source(
+                            tool_args.get('name'),
+                            tool_args.get('url'),
+                            tool_args.get('project_id'),
+                            tool_args.get('sync_interval', 3600)
+                        )
+                    elif tool_name == 'sync_ics_now':
+                        result = await sync_ics_now(tool_args.get('source_id'))
+                    elif tool_name == 'manage_ics_filter_rules':
+                        result = await manage_ics_filter_rules(
+                            tool_args.get('source_id'),
+                            tool_args.get('action'),
+                            tool_args.get('rule_type'),
+                            tool_args.get('rule_value')
+                        )
+                    elif tool_name == 'get_ics_conflicts':
+                        result = await get_ics_conflicts(tool_args.get('source_id'))
+                    elif tool_name == 'resolve_ics_conflict':
+                        result = await resolve_ics_conflict(
+                            tool_args.get('conflict_id'),
+                            tool_args.get('resolution')
+                        )
+                    elif tool_name == 'get_projects':
+                        # For web interface, return raw project data
+                        if not ticktick:
+                            if not initialize_client():
+                                result = {'error': 'Failed to initialize TickTick client'}
+                            else:
+                                projects = ticktick.get_projects()
+                                result = projects if 'error' not in projects else {'error': projects['error']}
+                        else:
+                            projects = ticktick.get_projects()
+                            result = projects if 'error' not in projects else {'error': projects['error']}
+                    elif tool_name == 'create_project':
+                        result = await create_project(
+                            tool_args.get('name'),
+                            tool_args.get('color', '#3498db')
+                        )
+                    else:
+                        result = f"Unknown tool: {tool_name}"
+                    
+                    response_data = {"result": result}
+                    response_body = json.dumps(response_data).encode()
+                    
+                    await send({
+                        'type': 'http.response.start',
+                        'status': 200,
+                        'headers': [
+                            (b'content-type', b'application/json'),
+                            (b'access-control-allow-origin', b'*'),
+                        ],
+                    })
+                    await send({
+                        'type': 'http.response.body',
+                        'body': response_body,
+                    })
+                    return
+                    
+                except Exception as e:
+                    error_response = json.dumps({"error": str(e)}).encode()
+                    await send({
+                        'type': 'http.response.start',
+                        'status': 500,
+                        'headers': [
+                            (b'content-type', b'application/json'),
+                        ],
+                    })
+                    await send({
+                        'type': 'http.response.body',
+                        'body': error_response,
+                    })
+                    return
+
             # Handle root path for server info
             if path == '/':
                 server_info = {
@@ -1196,6 +1986,44 @@ def run_remote_server(
                     'body': response_body,
                 })
                 return
+            
+            # Serve static files for web interface
+            if path.startswith('/web/') or path == '/web':
+                # Serve the React app
+                import os
+                web_dir = os.path.join(os.path.dirname(__file__), '..', 'web', 'dist')
+                
+                if path == '/web' or path == '/web/':
+                    file_path = os.path.join(web_dir, 'index.html')
+                else:
+                    file_path = os.path.join(web_dir, path[5:])  # Remove '/web/' prefix
+                
+                if os.path.exists(file_path) and os.path.isfile(file_path):
+                    # Determine content type
+                    content_type = b'text/html'
+                    if file_path.endswith('.js'):
+                        content_type = b'application/javascript'
+                    elif file_path.endswith('.css'):
+                        content_type = b'text/css'
+                    elif file_path.endswith('.json'):
+                        content_type = b'application/json'
+                    
+                    with open(file_path, 'rb') as f:
+                        file_content = f.read()
+                    
+                    await send({
+                        'type': 'http.response.start',
+                        'status': 200,
+                        'headers': [
+                            (b'content-type', content_type),
+                            (b'cache-control', b'public, max-age=3600'),
+                        ],
+                    })
+                    await send({
+                        'type': 'http.response.body',
+                        'body': file_content,
+                    })
+                    return
             
             # Pass to the MCP app for other paths
             await mcp_app(scope, receive, send)

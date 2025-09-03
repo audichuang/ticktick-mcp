@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import logging
+import re
 from datetime import datetime, timezone
 from typing import Dict, List, Any, Optional
 
@@ -19,6 +20,125 @@ mcp = FastMCP("ticktick")
 
 # Create TickTick client
 ticktick = None
+
+# Timezone offset mapping for smart timezone detection
+TIMEZONE_OFFSET_MAP = {
+    "+0800": "Asia/Taipei",      # Taiwan, China, Singapore
+    "+0900": "Asia/Tokyo",       # Japan, Korea  
+    "+0000": "UTC",              # UTC
+    "-0500": "America/New_York", # US Eastern (EST)
+    "-0400": "America/New_York", # US Eastern (EDT)
+    "-0800": "America/Los_Angeles", # US Pacific (PST)
+    "-0700": "America/Los_Angeles", # US Pacific (PDT)
+    "+0100": "Europe/London",    # UK (BST)
+}
+
+def infer_timezone_from_date(date_string: str) -> Optional[str]:
+    """
+    Extract timezone from ISO date string and map to timezone name.
+    
+    Args:
+        date_string: ISO 8601 date string (e.g., "2025-06-09T08:00:00+0800")
+    
+    Returns:
+        Timezone name (e.g., "Asia/Taipei") or None if not found
+    """
+    if not date_string:
+        return None
+    
+    # Extract timezone offset using regex
+    timezone_pattern = r'([+-]\d{4})$'
+    match = re.search(timezone_pattern, date_string)
+    
+    if match:
+        offset = match.group(1)
+        return TIMEZONE_OFFSET_MAP.get(offset)
+    
+    return None
+
+def normalize_timezone_format(date_string: str) -> str:
+    """
+    Normalize timezone format in ISO date string to TickTick API compatible format.
+    
+    Converts:
+    - "2025-09-20T12:00:00+08:00" -> "2025-09-20T12:00:00+0800"
+    - "2025-09-20T12:00:00+8:00" -> "2025-09-20T12:00:00+0800" 
+    - "2025-09-20T12:00:00+8" -> "2025-09-20T12:00:00+0800"
+    
+    Args:
+        date_string: ISO 8601 date string
+    
+    Returns:
+        Date string with normalized timezone format
+    """
+    if not date_string:
+        return date_string
+    
+    # Pattern to match timezone with colon: +08:00, -05:00, +8:00, etc.
+    import re
+    
+    # Match timezone patterns at the end of the string
+    timezone_pattern = r'([+-])(\d{1,2}):?(\d{2})?$'
+    match = re.search(timezone_pattern, date_string)
+    
+    if match:
+        sign = match.group(1)  # + or -
+        hours = match.group(2).zfill(2)  # Ensure 2 digits
+        minutes = match.group(3) or "00"  # Default to 00 if not present
+        
+        # Remove the original timezone part
+        base_date = date_string[:match.start()]
+        
+        # Add normalized timezone format
+        normalized_date = f"{base_date}{sign}{hours}{minutes}"
+        return normalized_date
+    
+    # If no colon format found, try to fix single digit timezones like +8
+    single_digit_pattern = r'([+-])(\d)$'
+    match = re.search(single_digit_pattern, date_string)
+    
+    if match:
+        sign = match.group(1)
+        hours = match.group(2).zfill(2)  # Convert 8 to 08
+        
+        # Remove the original timezone part
+        base_date = date_string[:match.start()]
+        
+        # Add normalized timezone format
+        normalized_date = f"{base_date}{sign}{hours}00"
+        return normalized_date
+    
+    return date_string
+
+def get_smart_timezone(time_zone: str, start_date: str, due_date: str) -> Optional[str]:
+    """
+    Get the best timezone for the task using smart inference.
+    
+    Args:
+        time_zone: Explicitly provided timezone
+        start_date: Start date string
+        due_date: Due date string
+    
+    Returns:
+        Best timezone name to use
+    """
+    # If explicitly provided, use that
+    if time_zone:
+        return time_zone
+    
+    # Try to infer from start_date
+    if start_date:
+        inferred = infer_timezone_from_date(start_date)
+        if inferred:
+            return inferred
+    
+    # Try to infer from due_date
+    if due_date:
+        inferred = infer_timezone_from_date(due_date)
+        if inferred:
+            return inferred
+    
+    return None
 
 def initialize_client():
     global ticktick
@@ -257,18 +377,40 @@ async def create_task(
     start_date: str = None, 
     due_date: str = None, 
     priority: int = 0,
+    is_all_day: bool = False,
+    time_zone: str = None,
     reminders: List[str] = None
 ) -> str:
     """
-    Create a new task in TickTick with optional reminders.
+    Create a new task in TickTick with optional reminders and timezone support.
     
     Args:
         title: Task title
         project_id: ID of the project to add the task to
         content: Task description/content (optional)
-        start_date: Start date in ISO format with timezone (e.g., 2025-06-09T08:00:00+0800 for 8AM Taiwan time) (optional)
-        due_date: Due date in ISO format with timezone (e.g., 2025-06-09T08:00:00+0800 for 8AM Taiwan time) (optional)
+        start_date: Start date in ISO format with timezone (optional)
+                   Examples:
+                   - "2025-06-09T08:00:00+0800" (8AM Taiwan time)
+                   - "2025-06-09T14:00:00+08:00" (also supported, will be normalized)
+                   - "2025-06-09T09:00:00-0500" (9AM US Eastern)
+                   Note: Both +0800 and +08:00 formats are accepted
+        due_date: Due date in ISO format with timezone (optional)
+                 Examples:
+                 - "2025-06-09T18:00:00+0800" (6PM Taiwan time)
+                 - "2025-06-09T18:00:00+08:00" (also supported, will be normalized)
+                 - "2025-06-09T17:00:00-0500" (5PM US Eastern)
+                 Note: Both +0800 and +08:00 formats are accepted
         priority: Priority level (0: None, 1: Low, 3: Medium, 5: High) (optional)
+        is_all_day: Whether this is an all-day task (default: False) (optional)
+        time_zone: Timezone for the task (optional)
+                  Common timezones:
+                  - "Asia/Taipei" (Taiwan, UTC+8)
+                  - "Asia/Tokyo" (Japan, UTC+9) 
+                  - "Asia/Shanghai" (China, UTC+8)
+                  - "America/New_York" (US Eastern)
+                  - "America/Los_Angeles" (US Pacific)
+                  - "Europe/London" (UK)
+                  If not provided, timezone will be inferred from the date format
         reminders: List of reminder triggers in TRIGGER format (optional)
                   Examples:
                   - ["TRIGGER:PT0S"] - At time of event
@@ -301,13 +443,22 @@ async def create_task(
                 if not reminder.startswith("TRIGGER:"):
                     return f"Invalid reminder format: {reminder}. Must start with 'TRIGGER:'"
         
+        # Normalize timezone format in dates before sending to API
+        normalized_start_date = normalize_timezone_format(start_date) if start_date else None
+        normalized_due_date = normalize_timezone_format(due_date) if due_date else None
+        
+        # Get smart timezone
+        smart_timezone = get_smart_timezone(time_zone, normalized_start_date, normalized_due_date)
+        
         task = ticktick.create_task(
             title=title,
             project_id=project_id,
             content=content,
-            start_date=start_date,
-            due_date=due_date,
+            start_date=normalized_start_date,
+            due_date=normalized_due_date,
             priority=priority,
+            is_all_day=is_all_day,
+            time_zone=smart_timezone,
             reminders=reminders
         )
         
@@ -328,19 +479,41 @@ async def update_task(
     start_date: str = None,
     due_date: str = None,
     priority: int = None,
+    is_all_day: bool = None,
+    time_zone: str = None,
     reminders: List[str] = None
 ) -> str:
     """
-    Update an existing task in TickTick with optional reminders.
+    Update an existing task in TickTick with optional reminders and timezone support.
     
     Args:
         task_id: ID of the task to update
         project_id: ID of the project the task belongs to
         title: New task title (optional)
         content: New task description/content (optional)
-        start_date: New start date in ISO format with timezone (e.g., 2025-06-09T08:00:00+0800 for 8AM Taiwan time) (optional)
-        due_date: New due date in ISO format with timezone (e.g., 2025-06-09T08:00:00+0800 for 8AM Taiwan time) (optional)
+        start_date: New start date in ISO format with timezone (optional)
+                   Examples:
+                   - "2025-06-09T08:00:00+0800" (8AM Taiwan time)
+                   - "2025-06-09T14:00:00+08:00" (also supported, will be normalized)
+                   - "2025-06-09T09:00:00-0500" (9AM US Eastern)
+                   Note: Both +0800 and +08:00 formats are accepted
+        due_date: New due date in ISO format with timezone (optional)
+                 Examples:
+                 - "2025-06-09T18:00:00+0800" (6PM Taiwan time)
+                 - "2025-06-09T18:00:00+08:00" (also supported, will be normalized)
+                 - "2025-06-09T17:00:00-0500" (5PM US Eastern)
+                 Note: Both +0800 and +08:00 formats are accepted
         priority: New priority level (0: None, 1: Low, 3: Medium, 5: High) (optional)
+        is_all_day: Whether this is an all-day task (optional)
+        time_zone: Timezone for the task (optional)
+                  Common timezones:
+                  - "Asia/Taipei" (Taiwan, UTC+8)
+                  - "Asia/Tokyo" (Japan, UTC+9) 
+                  - "Asia/Shanghai" (China, UTC+8)
+                  - "America/New_York" (US Eastern)
+                  - "America/Los_Angeles" (US Pacific)
+                  - "Europe/London" (UK)
+                  If not provided, timezone will be inferred from the date format
         reminders: List of reminder triggers in TRIGGER format (optional)
                   Examples:
                   - ["TRIGGER:PT0S"] - At time of event
@@ -373,14 +546,23 @@ async def update_task(
                 if not reminder.startswith("TRIGGER:"):
                     return f"Invalid reminder format: {reminder}. Must start with 'TRIGGER:'"
         
+        # Normalize timezone format in dates before sending to API
+        normalized_start_date = normalize_timezone_format(start_date) if start_date else None
+        normalized_due_date = normalize_timezone_format(due_date) if due_date else None
+        
+        # Get smart timezone
+        smart_timezone = get_smart_timezone(time_zone, normalized_start_date, normalized_due_date)
+        
         task = ticktick.update_task(
             task_id=task_id,
             project_id=project_id,
             title=title,
             content=content,
-            start_date=start_date,
-            due_date=due_date,
+            start_date=normalized_start_date,
+            due_date=normalized_due_date,
             priority=priority,
+            is_all_day=is_all_day,
+            time_zone=smart_timezone,
             reminders=reminders
         )
         

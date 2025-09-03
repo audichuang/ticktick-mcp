@@ -5,7 +5,7 @@ set -e
 DOCKER_USERNAME="audichuang880208"
 IMAGE_NAME="ticktick-mcp"
 TAG="latest"
-VERSION="1.0.1"  # Updated version for the fix
+VERSION="3.1.5"  # Optimized Docker image size - excluded node_modules
 
 # Full image names
 FULL_IMAGE_NAME="${DOCKER_USERNAME}/${IMAGE_NAME}:${TAG}"

@@ -230,7 +230,7 @@ class TickTickClient:
     def create_task(self, title: str, project_id: str, content: str = None, 
                    start_date: str = None, due_date: str = None, 
                    priority: int = 0, is_all_day: bool = False,
-                   reminders: List[str] = None) -> Dict:
+                   time_zone: str = None, reminders: List[str] = None) -> Dict:
         """Creates a new task with optional reminders.
         
         Args:
@@ -241,6 +241,7 @@ class TickTickClient:
             due_date: Due date in ISO format (optional)
             priority: Priority level 0-5 (optional)
             is_all_day: Whether this is an all-day task (optional)
+            time_zone: Timezone for the task (e.g., "Asia/Taipei", "America/New_York") (optional)
             reminders: List of reminder triggers (optional)
                       Format: "TRIGGER:P[n]DT[n]H[n]M[n]S"
                       Examples: 
@@ -265,6 +266,8 @@ class TickTickClient:
             data["priority"] = priority
         if is_all_day is not None:
             data["isAllDay"] = is_all_day
+        if time_zone:
+            data["timeZone"] = time_zone
         if reminders:
             data["reminders"] = reminders
             
@@ -273,6 +276,7 @@ class TickTickClient:
     def update_task(self, task_id: str, project_id: str, title: str = None, 
                    content: str = None, priority: int = None, 
                    start_date: str = None, due_date: str = None,
+                   is_all_day: bool = None, time_zone: str = None,
                    reminders: List[str] = None) -> Dict:
         """Updates an existing task with optional reminders.
         
@@ -284,6 +288,8 @@ class TickTickClient:
             priority: New priority level 0-5 (optional)
             start_date: New start date in ISO format (optional)
             due_date: New due date in ISO format (optional)
+            is_all_day: Whether this is an all-day task (optional)
+            time_zone: Timezone for the task (e.g., "Asia/Taipei", "America/New_York") (optional)
             reminders: List of reminder triggers (optional)
                       Format: "TRIGGER:P[n]DT[n]H[n]M[n]S"
                       Examples: 
@@ -307,6 +313,10 @@ class TickTickClient:
             data["startDate"] = start_date
         if due_date:
             data["dueDate"] = due_date
+        if is_all_day is not None:
+            data["isAllDay"] = is_all_day
+        if time_zone:
+            data["timeZone"] = time_zone
         if reminders is not None:
             data["reminders"] = reminders
             

@@ -117,16 +117,36 @@ uv run -m ticktick_mcp.cli remote --host 0.0.0.0 --port 8000
 
 ### 6. Configure Claude.ai Integration
 
+#### Option A: Direct Authentication (Recommended - No Login Required) 🚀
+
 1. Go to Claude.ai Settings > Integrations
 2. Click "Add integration"
 3. Enter:
    - **Name**: TickTick
-   - **URL**: `https://your-domain.com/sse`
+   - **Remote MCP server URL**: `https://your-domain.com/sse`
+   - **OAuth Client ID**: `ticktick-mcp-client`
+   - **OAuth Client Secret**: `TMC_2024_SecureSecret_ForDirectAuth_NoRedirect`
    
    Example:
    ```
-   https://ticktick-mcp.yourdomain.com/sse
+   Name: TickTick
+   URL: https://ticktick-mcp.yourdomain.com/sse
+   OAuth Client ID: ticktick-mcp-client
+   OAuth Client Secret: TMC_2024_SecureSecret_ForDirectAuth_NoRedirect
    ```
+
+4. Click "Connect"
+5. Claude.ai will automatically authenticate using OAuth Client Credentials flow
+6. **No login redirect required!** ✨
+
+#### Option B: Traditional OAuth Flow (Login Required)
+
+1. Go to Claude.ai Settings > Integrations
+2. Click "Add integration" 
+3. Enter:
+   - **Name**: TickTick
+   - **URL**: `https://your-domain.com/sse`
+   - **Leave OAuth fields empty**
 
 4. Click "Connect"
 5. Claude.ai will detect OAuth is required and redirect you to the login page
@@ -138,17 +158,34 @@ uv run -m ticktick_mcp.cli remote --host 0.0.0.0 --port 8000
 
 | Variable | Description | Required |
 |----------|-------------|----------|
-| `OAUTH_USERNAME` | Username for OAuth login page | Yes |
-| `OAUTH_PASSWORD` | Password for OAuth login page | Yes |
+| `OAUTH_USERNAME` | Username for OAuth login page (Option B only) | Yes |
+| `OAUTH_PASSWORD` | Password for OAuth login page (Option B only) | Yes |
+| `OAUTH_CLIENT_ID` | Client ID for direct authentication (Option A) | Yes |
+| `OAUTH_CLIENT_SECRET` | Client Secret for direct authentication (Option A) | Yes |
 | `TICKTICK_CLIENT_ID` | TickTick OAuth Client ID | Yes |
 | `TICKTICK_CLIENT_SECRET` | TickTick OAuth Client Secret | Yes |
 | `TICKTICK_ACCESS_TOKEN` | TickTick Access Token (auto-generated) | Yes |
 | `TICKTICK_REFRESH_TOKEN` | TickTick Refresh Token (auto-generated) | Yes |
 | `API_HOST` | API host (default: https://api.ticktick.com) | No |
 
+## Authentication Methods Comparison
+
+| Feature | Option A: Direct Auth | Option B: Login Flow |
+|---------|----------------------|---------------------|
+| **Setup Complexity** | ✅ Simple (one-time) | ⚠️ Moderate |
+| **User Experience** | ✅ No redirects | ❌ Login required |
+| **Security** | ✅ Client Credentials | ✅ User authentication |
+| **Maintenance** | ✅ Set & forget | ⚠️ Password management |
+| **Multi-user Support** | ❌ Single config | ✅ Per-user auth |
+| **Revocation** | ⚠️ Server restart | ✅ Individual sessions |
+
+**Recommendation**: Use **Option A (Direct Authentication)** for personal use or single-user deployments. Use **Option B (Login Flow)** for multi-user or enterprise environments.
+
 ## Security Best Practices
 
-1. **Use Strong Credentials**: Generate strong passwords for `OAUTH_USERNAME` and `OAUTH_PASSWORD`
+1. **Use Strong Credentials**: 
+   - Generate strong passwords for `OAUTH_USERNAME` and `OAUTH_PASSWORD` (Option B)
+   - Use secure Client Secret for `OAUTH_CLIENT_SECRET` (Option A)
 2. **Use HTTPS**: Always use Cloudflare Tunnel or another reverse proxy with SSL
 3. **Restrict Access**: Consider IP whitelisting at the firewall or Cloudflare level
 4. **Regular Updates**: Keep the Docker image and dependencies updated
