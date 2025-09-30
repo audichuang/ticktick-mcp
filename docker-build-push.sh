@@ -65,7 +65,7 @@ else
 fi
 
 # Optional: Also create and push a versioned tag
-VERSION="3.1.5"
+VERSION="3.1.8"
 VERSIONED_IMAGE="${DOCKER_USERNAME}/${IMAGE_NAME}:${VERSION}"
 echo ""
 echo "📦 Creating versioned tag ${VERSION}..."

@@ -64,3 +64,13 @@ coverage.xml
 # Scripts (except entrypoint)
 *.sh
 !entrypoint.sh
+
+# Node.js dependencies and build artifacts
+**/node_modules/
+node_modules/
+ticktick_mcp/web/node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+**/package-lock.json
+yarn.lock
