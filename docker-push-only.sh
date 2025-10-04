@@ -5,7 +5,7 @@ set -e
 DOCKER_USERNAME="audichuang880208"
 IMAGE_NAME="ticktick-mcp"
 TAG="latest"
-VERSION="3.1.8"  # Fixed ICS sync modifiedTime KeyError bug
+VERSION="3.1.9"  # OAuth token persistence + refresh fix
 
 # Full image names
 FULL_IMAGE_NAME="${DOCKER_USERNAME}/${IMAGE_NAME}:${TAG}"

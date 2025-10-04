@@ -87,7 +87,7 @@ class SyncHistory(Base):
 class SyncConflict(Base):
     """Conflict records for manual resolution"""
     __tablename__ = 'sync_conflicts'
-    
+
     id = Column(Integer, primary_key=True)
     source_id = Column(Integer, ForeignKey('ics_sources.id'), nullable=False)
     ics_uid = Column(String(200), nullable=False)
@@ -99,6 +99,27 @@ class SyncConflict(Base):
     resolved = Column(Boolean, default=False)
     resolved_at = Column(DateTime)
     resolution = Column(String(50))  # 'keep_ics', 'keep_ticktick', 'keep_both', 'delete_both'
+
+class OAuthToken(Base):
+    """OAuth access and refresh tokens"""
+    __tablename__ = 'oauth_tokens'
+
+    id = Column(Integer, primary_key=True)
+    token = Column(String(200), unique=True, nullable=False, index=True)
+    token_type = Column(String(20), nullable=False)  # 'access' or 'refresh'
+    client_id = Column(String(100), nullable=False)
+    username = Column(String(100))  # For authorization_code grant
+    scope = Column(String(200))
+    grant_type = Column(String(50))  # 'client_credentials', 'authorization_code', etc.
+    expires_at = Column(DateTime, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    # For refresh tokens: link to the access token they can refresh
+    parent_token = Column(String(200))  # The access token this refresh token belongs to
+
+    __table_args__ = (
+        {'sqlite_autoincrement': True},
+    )
 
 # Database initialization
 def init_db(db_path=None):

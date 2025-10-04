@@ -14,7 +14,7 @@ from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
 from .ticktick_client import TickTickClient
 from .ics_sync import ICSSyncEngine, FilterManager, ConflictResolver, start_scheduler, get_scheduler
-from .ics_sync.models import ICSSource, FilterRule, SyncConflict, get_db_session, init_db
+from .ics_sync.models import ICSSource, FilterRule, SyncConflict, OAuthToken, get_db_session, init_db
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -39,9 +39,88 @@ if OAUTH_PASSWORD == "ticktick-mcp-password":
 if OAUTH_CLIENT_SECRET == "default-client-secret":
     logger.warning("⚠️  Using default Client Secret! Please set OAUTH_CLIENT_SECRET environment variable for security.")
 
-# In-memory storage for OAuth
+# In-memory storage for OAuth authorization codes (short-lived, 10 min)
 auth_codes = {}  # code -> {client_id, redirect_uri, expires_at, username}
-access_tokens = {}  # token -> {username, expires_at, scope}
+
+# Token management helper functions
+def save_token_to_db(token: str, token_type: str, client_id: str, username: str,
+                     scope: str, grant_type: str, expires_at: float, parent_token: str = None) -> None:
+    """Save token to database"""
+    db_session = get_db_session()
+    try:
+        oauth_token = OAuthToken(
+            token=token,
+            token_type=token_type,
+            client_id=client_id,
+            username=username,
+            scope=scope,
+            grant_type=grant_type,
+            expires_at=datetime.utcfromtimestamp(expires_at),  # Use UTC to match comparisons
+            parent_token=parent_token
+        )
+        db_session.add(oauth_token)
+        db_session.commit()
+        logger.info(f"Saved {token_type} token to database (expires: {oauth_token.expires_at} UTC)")
+    except Exception as e:
+        db_session.rollback()
+        logger.error(f"Failed to save token to database: {e}")
+    finally:
+        db_session.close()
+
+def get_token_from_db(token: str) -> Optional[Dict]:
+    """Get token from database and check if expired"""
+    db_session = get_db_session()
+    try:
+        oauth_token = db_session.query(OAuthToken).filter_by(token=token).first()
+        if not oauth_token:
+            return None
+
+        # Check if expired
+        if oauth_token.expires_at < datetime.utcnow():
+            logger.info(f"Token expired: {token[:10]}...")
+            return None
+
+        return {
+            'token': oauth_token.token,
+            'token_type': oauth_token.token_type,
+            'client_id': oauth_token.client_id,
+            'username': oauth_token.username,
+            'scope': oauth_token.scope,
+            'grant_type': oauth_token.grant_type,
+            'expires_at': oauth_token.expires_at.timestamp(),
+            'parent_token': oauth_token.parent_token
+        }
+    finally:
+        db_session.close()
+
+def delete_token_from_db(token: str) -> None:
+    """Delete token from database"""
+    db_session = get_db_session()
+    try:
+        db_session.query(OAuthToken).filter_by(token=token).delete()
+        db_session.commit()
+        logger.info(f"Deleted token from database: {token[:10]}...")
+    except Exception as e:
+        db_session.rollback()
+        logger.error(f"Failed to delete token: {e}")
+    finally:
+        db_session.close()
+
+def cleanup_expired_tokens_db() -> None:
+    """Remove expired tokens from database"""
+    db_session = get_db_session()
+    try:
+        expired_count = db_session.query(OAuthToken).filter(
+            OAuthToken.expires_at < datetime.utcnow()
+        ).delete()
+        db_session.commit()
+        if expired_count > 0:
+            logger.info(f"Cleaned up {expired_count} expired tokens")
+    except Exception as e:
+        db_session.rollback()
+        logger.error(f"Failed to cleanup expired tokens: {e}")
+    finally:
+        db_session.close()
 
 # Create FastMCP server
 mcp = FastMCP("ticktick-remote")
@@ -1269,18 +1348,72 @@ LOGIN_PAGE_TEMPLATE = """<!DOCTYPE html>
 """
 
 def cleanup_expired_tokens():
-    """Remove expired authorization codes and access tokens."""
+    """Remove expired authorization codes and database tokens."""
     current_time = time.time()
-    
+
     # Clean up auth codes
     expired_codes = [code for code, data in auth_codes.items() if data['expires_at'] < current_time]
     for code in expired_codes:
         del auth_codes[code]
-    
-    # Clean up access tokens
-    expired_tokens = [token for token, data in access_tokens.items() if data['expires_at'] < current_time]
-    for token in expired_tokens:
-        del access_tokens[token]
+
+    # Clean up database tokens
+    cleanup_expired_tokens_db()
+
+async def mcp_sse_with_heartbeat(mcp_app, scope, receive, send):
+    """
+    Wrap MCP SSE connection with periodic heartbeat to prevent connection timeouts.
+    Sends SSE comment every 30 seconds to keep the connection alive.
+    """
+    # Create a custom send function that intercepts responses
+    heartbeat_task = None
+    send_lock = asyncio.Lock()
+
+    async def send_with_heartbeat(message):
+        """Custom send that allows heartbeat to be sent"""
+        async with send_lock:
+            await send(message)
+
+    async def heartbeat_loop():
+        """Send SSE comments every 30 seconds to keep connection alive"""
+        while True:
+            try:
+                await asyncio.sleep(30)  # 30 seconds interval (< 60s proxy timeout)
+                async with send_lock:
+                    # Send SSE comment (won't interrupt data stream)
+                    await send({
+                        'type': 'http.response.body',
+                        'body': b': heartbeat\n\n',
+                        'more_body': True
+                    })
+                    logger.debug("SSE heartbeat sent")
+            except asyncio.CancelledError:
+                logger.info("SSE heartbeat stopped")
+                break
+            except Exception as e:
+                logger.error(f"SSE heartbeat error: {e}")
+                break
+
+    # Intercept the initial response to start heartbeat
+    original_send = send
+
+    async def intercepting_send(message):
+        nonlocal heartbeat_task
+        if message['type'] == 'http.response.start':
+            # Start heartbeat after response headers are sent
+            heartbeat_task = asyncio.create_task(heartbeat_loop())
+        await send_with_heartbeat(message)
+
+    try:
+        # Call the original MCP app with intercepting send
+        await mcp_app(scope, receive, intercepting_send)
+    finally:
+        # Clean up heartbeat task
+        if heartbeat_task:
+            heartbeat_task.cancel()
+            try:
+                await heartbeat_task
+            except asyncio.CancelledError:
+                pass
 
 def run_remote_server(
     host: str = "0.0.0.0",
@@ -1557,7 +1690,7 @@ def run_remote_server(
                             'body': error_response,
                         })
                         return
-                    
+
                     # Validate client credentials
                     if client_id != OAUTH_CLIENT_ID or client_secret != OAUTH_CLIENT_SECRET:
                         error_response = json.dumps({'error': 'invalid_client', 'error_description': 'Invalid client credentials'}).encode()
@@ -1574,26 +1707,141 @@ def run_remote_server(
                             'body': error_response,
                         })
                         return
-                    
-                    # Generate access token for client credentials
+
+                    # Generate access token and refresh token
                     access_token = secrets.token_urlsafe(64)
-                    
-                    # Store access token (longer expiry for client credentials)
-                    access_tokens[access_token] = {
-                        'client_id': client_id,
-                        'expires_at': time.time() + 7200,  # 2 hours for client credentials
-                        'scope': 'mcp',
-                        'grant_type': 'client_credentials'
-                    }
-                    
-                    # Create token response
+                    refresh_token = secrets.token_urlsafe(64)
+
+                    # Calculate expiry times
+                    access_expires_at = time.time() + 3600  # 1 hour
+                    refresh_expires_at = time.time() + 2592000  # 30 days
+
+                    # Save access token to database
+                    save_token_to_db(
+                        token=access_token,
+                        token_type='access',
+                        client_id=client_id,
+                        username=None,
+                        scope='mcp',
+                        grant_type='client_credentials',
+                        expires_at=access_expires_at
+                    )
+
+                    # Save refresh token to database
+                    save_token_to_db(
+                        token=refresh_token,
+                        token_type='refresh',
+                        client_id=client_id,
+                        username=None,
+                        scope='mcp',
+                        grant_type='client_credentials',
+                        expires_at=refresh_expires_at,
+                        parent_token=access_token
+                    )
+
+                    # Create token response with refresh token
                     token_response = {
                         'access_token': access_token,
                         'token_type': 'Bearer',
-                        'expires_in': 7200,
+                        'expires_in': 3600,
+                        'refresh_token': refresh_token,
                         'scope': 'mcp'
                     }
-                    
+
+                    response_body = json.dumps(token_response).encode()
+                    await send({
+                        'type': 'http.response.start',
+                        'status': 200,
+                        'headers': [
+                            (b'content-type', b'application/json'),
+                            (b'cache-control', b'no-store'),
+                        ],
+                    })
+                    await send({
+                        'type': 'http.response.body',
+                        'body': response_body,
+                    })
+                    return
+
+                elif grant_type == 'refresh_token':
+                    # Refresh Token Grant - exchange refresh token for new access token
+                    refresh_token_value = form_data.get('refresh_token', [''])[0]
+
+                    if not refresh_token_value:
+                        error_response = json.dumps({'error': 'invalid_request', 'error_description': 'refresh_token required'}).encode()
+                        await send({
+                            'type': 'http.response.start',
+                            'status': 400,
+                            'headers': [
+                                (b'content-type', b'application/json'),
+                                (b'cache-control', b'no-store'),
+                            ],
+                        })
+                        await send({
+                            'type': 'http.response.body',
+                            'body': error_response,
+                        })
+                        return
+
+                    # Validate refresh token from database
+                    refresh_token_data = get_token_from_db(refresh_token_value)
+
+                    if not refresh_token_data or refresh_token_data['token_type'] != 'refresh':
+                        error_response = json.dumps({'error': 'invalid_grant', 'error_description': 'Invalid or expired refresh token'}).encode()
+                        await send({
+                            'type': 'http.response.start',
+                            'status': 400,
+                            'headers': [
+                                (b'content-type', b'application/json'),
+                                (b'cache-control', b'no-store'),
+                            ],
+                        })
+                        await send({
+                            'type': 'http.response.body',
+                            'body': error_response,
+                        })
+                        return
+
+                    # Delete old access token if exists
+                    if refresh_token_data.get('parent_token'):
+                        delete_token_from_db(refresh_token_data['parent_token'])
+
+                    # Generate new access token
+                    new_access_token = secrets.token_urlsafe(64)
+                    access_expires_at = time.time() + 3600  # 1 hour
+
+                    # Save new access token to database
+                    save_token_to_db(
+                        token=new_access_token,
+                        token_type='access',
+                        client_id=refresh_token_data['client_id'],
+                        username=refresh_token_data.get('username'),
+                        scope=refresh_token_data['scope'],
+                        grant_type=refresh_token_data['grant_type'],
+                        expires_at=access_expires_at
+                    )
+
+                    # Update refresh token's parent_token reference
+                    db_session = get_db_session()
+                    try:
+                        db_token = db_session.query(OAuthToken).filter_by(token=refresh_token_value).first()
+                        if db_token:
+                            db_token.parent_token = new_access_token
+                            db_session.commit()
+                    finally:
+                        db_session.close()
+
+                    # Create token response
+                    token_response = {
+                        'access_token': new_access_token,
+                        'token_type': 'Bearer',
+                        'expires_in': 3600,
+                        'refresh_token': refresh_token_value,  # Return the same refresh token
+                        'scope': refresh_token_data['scope']
+                    }
+
+                    logger.info(f"Refreshed access token for client {refresh_token_data['client_id']}")
+
                     response_body = json.dumps(token_response).encode()
                     await send({
                         'type': 'http.response.start',
@@ -1642,25 +1890,47 @@ def run_remote_server(
                         'body': error_response,
                     })
                     return
-                
+
                 # Remove used auth code
                 del auth_codes[code]
-                
-                # Generate access token
+
+                # Generate access token and refresh token
                 access_token = secrets.token_urlsafe(64)
-                
-                # Store access token
-                access_tokens[access_token] = {
-                    'username': auth_data['username'],
-                    'expires_at': time.time() + 3600,  # 1 hour
-                    'scope': auth_data.get('scope', '')
-                }
-                
-                # Create token response
+                refresh_token = secrets.token_urlsafe(64)
+
+                # Calculate expiry times
+                access_expires_at = time.time() + 3600  # 1 hour
+                refresh_expires_at = time.time() + 2592000  # 30 days
+
+                # Save access token to database
+                save_token_to_db(
+                    token=access_token,
+                    token_type='access',
+                    client_id=auth_data['client_id'],
+                    username=auth_data['username'],
+                    scope=auth_data.get('scope', ''),
+                    grant_type='authorization_code',
+                    expires_at=access_expires_at
+                )
+
+                # Save refresh token to database
+                save_token_to_db(
+                    token=refresh_token,
+                    token_type='refresh',
+                    client_id=auth_data['client_id'],
+                    username=auth_data['username'],
+                    scope=auth_data.get('scope', ''),
+                    grant_type='authorization_code',
+                    expires_at=refresh_expires_at,
+                    parent_token=access_token
+                )
+
+                # Create token response with refresh token
                 token_response = {
                     'access_token': access_token,
                     'token_type': 'Bearer',
                     'expires_in': 3600,
+                    'refresh_token': refresh_token,
                     'scope': auth_data.get('scope', '')
                 }
                 
@@ -1738,7 +2008,7 @@ def run_remote_server(
             
             # Validate token for protected endpoints
             if path in ['/sse', '/messages']:
-                if not token or token not in access_tokens:
+                if not token:
                     # Return 401 Unauthorized
                     await send({
                         'type': 'http.response.start',
@@ -1753,11 +2023,12 @@ def run_remote_server(
                         'body': b'Unauthorized',
                     })
                     return
-                
-                # Check if token is expired
-                token_data = access_tokens[token]
-                if token_data['expires_at'] < time.time():
-                    del access_tokens[token]
+
+                # Validate token from database
+                token_data = get_token_from_db(token)
+
+                if not token_data or token_data['token_type'] != 'access':
+                    # Invalid or expired token
                     await send({
                         'type': 'http.response.start',
                         'status': 401,
@@ -1768,7 +2039,7 @@ def run_remote_server(
                     })
                     await send({
                         'type': 'http.response.body',
-                        'body': b'Token expired',
+                        'body': b'Token expired or invalid',
                     })
                     return
             
@@ -1791,14 +2062,19 @@ def run_remote_server(
                     # Simple authentication check
                     if username == OAUTH_USERNAME and password == OAUTH_PASSWORD:
                         # Generate a simple token
-                        token = base64.b64encode(f"{username}:{int(time.time())}".encode()).decode()
-                        
-                        # Store token with expiration (24 hours)
-                        access_tokens[token] = {
-                            'username': username,
-                            'expires_at': time.time() + 86400,  # 24 hours
-                            'scope': 'web'
-                        }
+                        token = secrets.token_urlsafe(64)
+
+                        # Store token with expiration (24 hours) in database
+                        expires_at = time.time() + 86400  # 24 hours
+                        save_token_to_db(
+                            token=token,
+                            token_type='access',
+                            client_id='web',
+                            username=username,
+                            scope='web',
+                            grant_type='web_login',
+                            expires_at=expires_at
+                        )
                         
                         response_data = json.dumps({
                             'success': True,
@@ -2025,8 +2301,12 @@ def run_remote_server(
                     })
                     return
             
-            # Pass to the MCP app for other paths
-            await mcp_app(scope, receive, send)
+            # Pass to the MCP app for other paths (with SSE heartbeat wrapper)
+            if path == '/sse':
+                # Wrap the SSE connection with heartbeat
+                await mcp_sse_with_heartbeat(mcp_app, scope, receive, send)
+            else:
+                await mcp_app(scope, receive, send)
         else:
             # For non-HTTP (like WebSocket), pass through
             await mcp_app(scope, receive, send)
